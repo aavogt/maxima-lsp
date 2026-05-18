@@ -1,0 +1,31 @@
+cabal-version: 1.12
+
+-- This file has been generated from package.yaml by hpack version 0.39.1.
+--
+-- see: https://github.com/sol/hpack
+
+name:           maxima-lsp
+version:        0.0.0
+build-type:     Simple
+
+executable maxima-lsp
+  main-is: main.hs
+  other-modules:
+      Paths_maxima_lsp
+  default-extensions:
+      BlockArguments
+      RecordWildCards
+      RecordPuns
+      DataKinds
+      TypeOperators
+  build-depends:
+      aeson
+    , base
+    , lens
+    , lens-regex-pcre
+    , lsp
+    , lsp-types
+    , pcre-light
+    , regex-applicative
+    , text
+  default-language: Haskell2010

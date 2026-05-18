@@ -1,0 +1,21 @@
+dependencies:
+  - lsp
+  - lsp-types
+  - base
+  - lens
+  - lens-regex-pcre
+  - pcre-light
+  - regex-applicative
+  - text
+  - aeson
+
+default-extensions:
+  - BlockArguments
+  - RecordWildCards
+  - RecordPuns
+  - DataKinds
+  - TypeOperators
+
+executable:
+  main:
+    main.hs
