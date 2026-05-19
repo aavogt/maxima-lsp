@@ -11,7 +11,10 @@ build-type:     Simple
 executable maxima-lsp
   main-is: main.hs
   other-modules:
+      Pun
       Paths_maxima_lsp
+  hs-source-dirs:
+      ./
   default-extensions:
       BlockArguments
       RecordWildCards
@@ -20,12 +23,14 @@ executable maxima-lsp
       TypeOperators
   build-depends:
       aeson
+    , aeson-qq
     , base
     , lens
+    , lens-aeson
     , lens-regex-pcre
-    , lsp
-    , lsp-types
     , pcre-light
     , regex-applicative
+    , template-haskell
     , text
+    , vector
   default-language: Haskell2010

@@ -1,6 +1,4 @@
 dependencies:
-  - lsp
-  - lsp-types
   - base
   - lens
   - lens-regex-pcre
@@ -8,6 +6,10 @@ dependencies:
   - regex-applicative
   - text
   - aeson
+  - vector
+  - template-haskell
+  - lens-aeson
+  - aeson-qq
 
 default-extensions:
   - BlockArguments
@@ -17,5 +19,6 @@ default-extensions:
   - TypeOperators
 
 executable:
+  source-dirs: .
   main:
     main.hs

@@ -2,9 +2,13 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module Main where
 
@@ -12,7 +16,10 @@ import Control.Exception (IOException, try)
 import Control.Lens
 import Control.Lens.Regex.Text
 import Control.Monad.IO.Class (liftIO)
-import Data.Aeson (FromJSON, ToJSON)
+import Data.Aeson (FromJSON, ToJSON (toJSON), decodeStrictText)
+import Data.Aeson.Decoding (decodeStrict)
+import Data.Aeson.QQ
+import Data.Aeson.Types (Value)
 import Data.Char
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
@@ -20,28 +27,31 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.IO as T
 import GHC.Generics (Generic)
-import Network.Wai.Handler.Warp (run)
-import Servant.API ((:<|>) (..))
-import Servant.Server (Handler, Server, serve)
-import Servant.Server.JsonRpc (JSONRPC, JsonRpc, JsonRpcErr (..), RawJsonRpc, invalidParamsCode)
+import Pun (json)
 import Text.Regex.Applicative hiding (match)
 import Text.Regex.PCRE.Light (compile)
 
-main :: IO ()
-main = run 8080 $ serve (Proxy @(RawJsonRpc JSONRPC API)) server
+f :: Value -> Int
+f [json| { x } |] = x :: Int
 
--- JSON-RPC API
+main = do
+  print (f [aesonQQ| { x: 3 } |])
+  return ()
 
-type PrepareRename = JsonRpc "prepareRename" PrepareRenameParams String (Maybe Range)
+lsp [json| { method params id } |] = case method :: Text of
+  "initialize" -> resp [aesonQQ| { capabilities : { renameProvider : { prepareProvider : true, workDoneProgress : false } } } |]
+  "textDocument/prepareRename" -> resp (prepareRename params)
+  "textDocument/rename" -> resp (rename params)
+  where
+    resp (result :: Value) = [aesonQQ| { jsonrpc: 2.0, id : #{id :: Int}, result : #{result} } |]
 
-type Rename = JsonRpc "rename" RenameParams String (Maybe TextEdit)
+rename :: Value -> Value
+rename = _
 
-type API = PrepareRename :<|> Rename
+prepareRename :: Value -> Value
+prepareRename = _
 
-server = handlePrepareRename :<|> handleRename
-
--- JSON payloads
-
+{-
 data Position = Position
   { line :: Int,
     character :: Int
@@ -72,26 +82,6 @@ data RenameParams = RenameParams
     newName :: Text
   }
   deriving (Eq, Show, Generic)
-
-instance FromJSON Position
-
-instance ToJSON Position
-
-instance FromJSON Range
-
-instance ToJSON Range
-
-instance FromJSON TextEdit
-
-instance ToJSON TextEdit
-
-instance FromJSON PrepareRenameParams
-
-instance ToJSON PrepareRenameParams
-
-instance FromJSON RenameParams
-
-instance ToJSON RenameParams
 
 handlePrepareRename :: PrepareRenameParams -> Handler (Either (JsonRpcErr String) (Maybe Range))
 handlePrepareRename (PrepareRenameParams fp pos) = do
@@ -156,3 +146,4 @@ alphaNumThenAlpha =
     xs <- many (psym isAlphaNum)
     x <- psym isAlpha
     pure (T.pack xs `T.snoc` x)
+    -}
