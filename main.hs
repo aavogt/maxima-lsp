@@ -9,49 +9,92 @@
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# OPTIONS_GHC -ddump-splices #-}
 
 module Main where
 
-import Control.Exception (IOException, try)
+import Control.Exception (IOException, SomeException (..), catch, try, PatternMatchFail (..))
 import Control.Lens
 import Control.Lens.Regex.Text
-import Control.Monad.IO.Class (liftIO)
-import Data.Aeson (FromJSON, ToJSON (toJSON), decodeStrictText)
-import Data.Aeson.Decoding (decodeStrict)
+import Data.Aeson (FromJSON, Result (..), Value (..), decodeStrict, encode, fromJSON)
 import Data.Aeson.QQ
-import Data.Aeson.Types (Value)
+import qualified Data.ByteString.Lazy as BL
 import Data.Char
-import Data.Proxy (Proxy (..))
+import Data.Functor ((<&>))
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.IO as T
 import GHC.Generics (Generic)
 import Pun (json)
-import Text.Regex.Applicative hiding (match)
+import Text.Regex.Applicative hiding (match, match)
 import Text.Regex.PCRE.Light (compile)
+import System.IO
+import Text.Regex.Applicative hiding (match)
+import qualified Data.ByteString.Char8 as C8
+import qualified Data.ByteString.Lazy.Char8 as L8
+import Data.Int
+import Data.Aeson.Decoding (decode)
+import Data.Foldable (for_, traverse_)
+import Control.Monad
+import Data.Aeson.Types (ToJSON (toJSON))
 
-f :: Value -> Int
-f [json| { x } |] = x :: Int
+contentLength :: Read a => RE Char a
+contentLength = do
+  string "Content-Length: "
+  n <- some (psym isDigit)
+  pure (read n)
 
-main = do
-  print (f [aesonQQ| { x: 3 } |])
-  return ()
+addContentLength :: L8.ByteString -> L8.ByteString
+addContentLength txt = "Content-Length: " <> L8.pack (show (L8.length txt)) <> "\r\n\r\n" <> txt
 
+message :: IO Value
+message = do
+  Just (n, _) <- C8.getLine <&> findLongestPrefixWithUncons C8.uncons contentLength
+  C8.getLine
+  maybe message return . decode =<< L8.hGet stdin n
+ `catch` \SomeException{} -> message
+
+-- Content-Length: nnn\r\n\r\n<nnn bytes>
+main :: IO ()
+main = forever $ try @PatternMatchFail do
+    m <- message
+    mr <- fmap (addContentLength . encode) <$> lsp m
+    traverse_ L8.putStr mr
+    hFlush stdout
+
+lsp :: Value -> IO (Maybe Value)
 lsp [json| { method params id } |] = case method :: Text of
-  "initialize" -> resp [aesonQQ| { capabilities : { renameProvider : { prepareProvider : true, workDoneProgress : false } } } |]
-  "textDocument/prepareRename" -> resp (prepareRename params)
-  "textDocument/rename" -> resp (rename params)
+  "initialize" -> pure (resp [aesonQQ| { capabilities : { renameProvider : { prepareProvider : true, workDoneProgress : false } }, textDocumentSync : 1 } |])
+  "textDocument/prepareRename" -> respIo (prepareRename params)
+  "textDocument/rename" -> respIo (rename params)
+  _ -> pure Nothing
   where
-    resp (result :: Value) = [aesonQQ| { jsonrpc: 2.0, id : #{id :: Int}, result : #{result} } |]
+    resp (result :: Value) = Just [aesonQQ| { jsonrpc: "2.0", id : #{id :: Int}, result : #{result} } |]
+    respIo ioResult = ioResult <&> resp
+lsp _ = return Nothing
 
-rename :: Value -> Value
-rename = _
+rename :: Value -> IO Value
+rename [json| { _textDocument{uri} _position{line character} newName } |]= do
+  let fp = uriToFilePath uri
+      pos = Position line character
+  Just content  <- readFileMaybe fp
+  let Just (left, right) = identifierUnderCursor (Just content) pos
+  let ident = left <> right
+      regex = compile (T.encodeUtf8 ident) []
+      newContent = content & regexing regex . match .~ newName
+      editRange = wholeRange (Just content) -- newContent can be longer...
+  pure $! workspaceEditValue fp editRange newContent
+ `catch` \PatternMatchFail {} -> pure Null
 
-prepareRename :: Value -> Value
-prepareRename = _
+prepareRename :: Value -> IO Value
+prepareRename [json| { _textDocument{uri} _position{line character} } |] = do
+  Just content <- readFileMaybe $ uriToFilePath uri
+  let pos = Position line character
+  Just r <- return $ toJSON . toPrrFrom line character <$> identifierUnderCursor (Just content) pos
+  return $! r
+ `catch` \PatternMatchFail {} -> pure Null
 
-{-
 data Position = Position
   { line :: Int,
     character :: Int
@@ -64,48 +107,8 @@ data Range = Range
   }
   deriving (Eq, Show, Generic)
 
-data TextEdit = TextEdit
-  { range :: Range,
-    newText :: Text
-  }
-  deriving (Eq, Show, Generic)
-
-data PrepareRenameParams = PrepareRenameParams
-  { filePath :: FilePath,
-    position :: Position
-  }
-  deriving (Eq, Show, Generic)
-
-data RenameParams = RenameParams
-  { filePath :: FilePath,
-    position :: Position,
-    newName :: Text
-  }
-  deriving (Eq, Show, Generic)
-
-handlePrepareRename :: PrepareRenameParams -> Handler (Either (JsonRpcErr String) (Maybe Range))
-handlePrepareRename (PrepareRenameParams fp pos) = do
-  mp <- liftIO $ readFileMaybe fp
-  case mp of
-    Nothing -> pure $ Left (err "can't read file " fp)
-    Just content -> do
-      let mident = identifierUnderCursor (Just content) pos
-      pure $ Right $ fmap (toPrrFrom pos) mident
-
-handleRename :: RenameParams -> Handler (Either (JsonRpcErr String) (Maybe TextEdit))
-handleRename (RenameParams fp pos newNameText) = do
-  mp <- liftIO $ readFileMaybe fp
-  case mp of
-    Nothing -> pure $ Left (err "can't read file " fp)
-    Just content ->
-      case identifierUnderCursor (Just content) pos of
-        Nothing -> pure $ Left (err "can't find identifier at " pos)
-        Just (left, right) -> do
-          let ident = left <> right
-              regex = compile (T.encodeUtf8 ident) []
-              newContent = content & regexing regex . match .~ newNameText
-              edit = TextEdit (textRange (Just content)) newContent
-          pure $ Right (Just edit)
+instance ToJSON Range
+instance ToJSON Position
 
 readFileMaybe :: FilePath -> IO (Maybe Text)
 readFileMaybe fp = do
@@ -116,11 +119,11 @@ identifierUnderCursor :: Maybe Text -> Position -> Maybe (Text, Text)
 identifierUnderCursor mp (Position n c) =
   mp ^? _Just . to T.lines . ix n
     <&> T.splitAt c
-    >>= _1 . reversed %%~ alphaNumThenAlpha
+    <&> _1 . reversed %~ alphaNumThenAlpha -- allowed to be empty
     <&> _2 %~ T.takeWhile isAlphaNum
 
-textRange :: Maybe Text -> Range
-textRange mp = Range (Position 0 0) (Position endLine endChar)
+wholeRange :: Maybe Text -> Range
+wholeRange mp = Range (Position 0 0) (Position endLine endChar)
   where
     endLine = maybe 0 (length . T.lines) mp
     endChar = maybe 0 T.length $ (mlast . T.lines) =<< mp
@@ -128,22 +131,29 @@ textRange mp = Range (Position 0 0) (Position endLine endChar)
     mlast [] = Nothing
     mlast xs = Just (last xs)
 
-toPrrFrom :: Position -> (Text, Text) -> Range
-toPrrFrom pos (left, right) = toPrr (T.length left) (T.length right) pos
+toPrrFrom :: Int -> Int -> (Text, Text) -> Range
+toPrrFrom line col (T.length -> nl, T.length -> nr) = rangeLine line (col - nl) (col + nr)
 
-toPrr :: Int -> Int -> Position -> Range
-toPrr left right pos = Range (shift (-left) pos) (shift right pos)
+rangeLine :: Int -> Int -> Int -> Range
+rangeLine line c1 c2 = Range (Position line (max 0 c1)) (Position line (max 0 c2))
 
-shift :: Int -> Position -> Position
-shift n (Position line col) = Position line (max 0 (col + n))
-
-err :: (Show a) => Text -> a -> JsonRpcErr String
-err txt info = JsonRpcErr invalidParamsCode (T.unpack (txt <> T.pack (show info))) Nothing
-
-alphaNumThenAlpha :: Text -> Maybe Text
+alphaNumThenAlpha :: Text -> Text
 alphaNumThenAlpha =
-  fmap (fmap fst) . findLongestPrefixWithUncons T.uncons $ do
+  (maybe "" fst .) . findLongestPrefixWithUncons T.uncons $ do
     xs <- many (psym isAlphaNum)
     x <- psym isAlpha
     pure (T.pack xs `T.snoc` x)
-    -}
+
+uriToFilePath :: Text -> FilePath
+uriToFilePath uri =
+  case T.stripPrefix "file://" uri of
+    Just path -> T.unpack path
+    Nothing -> T.unpack uri
+
+filePathToUri :: FilePath -> String
+filePathToUri fp = "file://" <> fp
+
+workspaceEditValue :: FilePath -> Range -> Text -> Value
+workspaceEditValue fp range newText =
+  let uri = filePathToUri fp
+   in [aesonQQ| { changes: { $uri: [ { range: #{range}, newText: #{newText} }  ] } } |]

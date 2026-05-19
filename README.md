@@ -1,5 +1,4 @@
-An attempt to use the lsp package for maxima.
+bugs
 
-It doesn't advertise capabilities or something
+uses the filesystem copy, so you have to save first
 
-- [ ] rename via pcre

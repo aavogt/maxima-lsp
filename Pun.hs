@@ -53,7 +53,7 @@ import Data.Aeson (FromJSON, Result (..), ToJSON, Value (..), fromJSON, object, 
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Lens
-import Data.List (unfoldr)
+import Data.List (isPrefixOf, unfoldr)
 import qualified Data.Vector as V
 import Language.Haskell.TH
 import Language.Haskell.TH.Quote
@@ -63,6 +63,7 @@ makePrisms ''Result
 -- ── Runtime helpers ───────────────────────────────────────────────────────────
 
 -- | Look up a field in an Object, returning 'Nothing' for any other 'Value'.
+jsonGet :: (FromJSON a, ToJSON a) => String -> Value -> Maybe a
 jsonGet k o = o ^? key (Key.fromString k) . _JSON
 
 -- | Left-biased shallow merge of two Objects (non-Objects pass through as-is).
@@ -162,9 +163,10 @@ jMes inp = error $ "Data.Aeson.QQ.Pun.jMes: unexpected: " ++ show (map ppTree in
 
 -- | Object pattern: view function extracts a tuple of @Maybe Value@,
 -- one per non-wildcard field.
-jpatCD f as =
-  let (fs, ps) = unzip $ filter ((/= "_") . fst) (jMps as)
-   in viewP (jExtracts fs) (tupP (map f ps))
+jpatCD f as = do
+  v <- newName "v"
+  let (extracts, ps) = unzip (jMpsFlat [|Just $(varE v)|] as)
+  viewP (lamE [varP v] (tupE extracts)) (tupP (map f ps))
 
 jPat :: Tree -> PatQ
 jPat (C as) = jpatCD id as
@@ -176,22 +178,34 @@ jPat (A as) =
         [p|Just $(listP ps)|]
 jPat (V a) = varP (mkName a)
 
--- | Build @\v -> (jsonGet "a" v, jsonGet "b" v, ...)@.
-jExtracts :: [String] -> ExpQ
-jExtracts fields = do
-  v <- newName "v"
-  lamE [varP v] $
-    tupE
-      [[|jsonGet $(litE (stringL f)) $(varE v)|] | f <- fields]
+-- | Each entry is @(extractExp, patQ)@ where patQ matches @Maybe Value@.
+-- The extractExp produces a @Maybe Value@ for the corresponding field.
+jMpsFlat :: ExpQ -> [Tree] -> [(ExpQ, PatQ)]
+jMpsFlat base (V "_" : rest) = (base >> [|const Nothing|], wildP) : jMpsFlat base rest
+jMpsFlat base (V a : C b : rest) =
+  let (field, discard) = stripDiscardSigil a
+      next = [|$base >>= jsonGet $(litE (stringL field))|]
+   in if discard
+        then jMpsFlat next b ++ jMpsFlat base rest
+        else (next, conP 'Just [jPat (C b)]) : jMpsFlat base rest
+jMpsFlat base (V a : D b : rest) =
+  let (field, discard) = stripDiscardSigil a
+      next = [|$base >>= jsonGet $(litE (stringL field))|]
+   in if discard
+        then jMpsFlat next b ++ jMpsFlat base rest
+        else (next, conP 'Just [jPat (D b)]) : jMpsFlat base rest
+jMpsFlat base (V a : rest) =
+  let (field, discard) = stripDiscardSigil a
+      next = [|$base >>= jsonGet $(litE (stringL field))|]
+      pat = if discard then wildP else varP (mkName a)
+   in (next, conP 'Just [pat]) : jMpsFlat base rest
+jMpsFlat _ [] = []
+jMpsFlat _ inp = error $ "Data.Aeson.QQ.Pun.jMpsFlat: unexpected: " ++ show (map ppTree inp)
 
--- | Each entry is @(fieldName, patQ)@ where patQ matches @Maybe Value@.
-jMps :: [Tree] -> [(String, PatQ)]
-jMps (V "_" : rest) = ("_", wildP) : jMps rest
-jMps (V a : C b : rest) = (a, conP 'Just [jPat (C b)]) : jMps rest
-jMps (V a : D b : rest) = (a, conP 'Just [jPat (D b)]) : jMps rest
-jMps (V a : rest) = (a, conP 'Just [varP (mkName a)]) : jMps rest
-jMps [] = []
-jMps inp = error $ "Data.Aeson.QQ.Pun.jMps: unexpected: " ++ show (map ppTree inp)
+stripDiscardSigil :: String -> (String, Bool)
+stripDiscardSigil name = case name of
+  '_' : rest@(_ : _) -> (rest, True)
+  _ -> (name, False)
 
 -- | Each entry is a patQ matching a @Value@ (no Maybe — these are list elements).
 jArrMps :: [Tree] -> [PatQ]
