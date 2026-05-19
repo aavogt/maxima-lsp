@@ -13,33 +13,34 @@
 
 module Main where
 
-import Control.Exception (IOException, SomeException (..), catch, try, PatternMatchFail (..))
+import Control.Concurrent
+import Control.Exception (IOException, PatternMatchFail (..), SomeException (..), catch, try)
 import Control.Lens
 import Control.Lens.Regex.Text
+import Control.Monad
 import Data.Aeson (FromJSON, Result (..), Value (..), decodeStrict, encode, fromJSON)
+import Data.Aeson.Decoding (decode)
 import Data.Aeson.QQ
+import Data.Aeson.Types (ToJSON (toJSON))
+import qualified Data.ByteString.Char8 as C8
 import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString.Lazy.Char8 as L8
 import Data.Char
+import Data.Foldable (for_, traverse_)
 import Data.Functor ((<&>))
+import Data.Int
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.IO as T
 import GHC.Generics (Generic)
 import Pun (json)
-import Text.Regex.Applicative hiding (match, match)
-import Text.Regex.PCRE.Light (compile)
 import System.IO
+import System.Posix.Resource
 import Text.Regex.Applicative hiding (match)
-import qualified Data.ByteString.Char8 as C8
-import qualified Data.ByteString.Lazy.Char8 as L8
-import Data.Int
-import Data.Aeson.Decoding (decode)
-import Data.Foldable (for_, traverse_)
-import Control.Monad
-import Data.Aeson.Types (ToJSON (toJSON))
+import Text.Regex.PCRE.Light (compile)
 
-contentLength :: Read a => RE Char a
+contentLength :: (Read a) => RE Char a
 contentLength = do
   string "Content-Length: "
   n <- some (psym isDigit)
@@ -49,19 +50,26 @@ addContentLength :: L8.ByteString -> L8.ByteString
 addContentLength txt = "Content-Length: " <> L8.pack (show (L8.length txt)) <> "\r\n\r\n" <> txt
 
 message :: IO Value
-message = do
-  Just (n, _) <- C8.getLine <&> findLongestPrefixWithUncons C8.uncons contentLength
-  C8.getLine
-  maybe message return . decode =<< L8.hGet stdin n
- `catch` \SomeException{} -> message
+message =
+  do
+    Just (n, _) <- C8.getLine <&> findLongestPrefixWithUncons C8.uncons contentLength
+    C8.getLine
+    maybe message return . decode =<< L8.hGet stdin n
+    `catch` \SomeException {} -> message
 
--- Content-Length: nnn\r\n\r\n<nnn bytes>
+limit resource amt = setResourceLimit resource (ResourceLimits (ResourceLimit amt) (ResourceLimit amt))
+
 main :: IO ()
-main = forever $ try @PatternMatchFail do
+main = do
+  limit ResourceTotalMemory 10000
+  limit ResourceCPUTime 10
+  forever $ try @PatternMatchFail do
     m <- message
     mr <- fmap (addContentLength . encode) <$> lsp m
-    traverse_ L8.putStr mr
-    hFlush stdout
+    for_ mr \r -> do
+      L8.putStr r
+      hFlush stdout
+    threadDelay (100 * 1000) -- 0.1s
 
 lsp :: Value -> IO (Maybe Value)
 lsp [json| { method params id } |] = case method :: Text of
@@ -75,25 +83,27 @@ lsp [json| { method params id } |] = case method :: Text of
 lsp _ = return Nothing
 
 rename :: Value -> IO Value
-rename [json| { _textDocument{uri} _position{line character} newName } |]= do
-  let fp = uriToFilePath uri
-      pos = Position line character
-  Just content  <- readFileMaybe fp
-  let Just (left, right) = identifierUnderCursor (Just content) pos
-  let ident = left <> right
-      regex = compile (T.encodeUtf8 ident) []
-      newContent = content & regexing regex . match .~ newName
-      editRange = wholeRange (Just content) -- newContent can be longer...
-  pure $! workspaceEditValue fp editRange newContent
- `catch` \PatternMatchFail {} -> pure Null
+rename [json| { _textDocument{uri} _position{line character} newName } |] =
+  do
+    let fp = uriToFilePath uri
+        pos = Position line character
+    Just content <- readFileMaybe fp
+    let Just (left, right) = identifierUnderCursor (Just content) pos
+    let ident = left <> right
+        regex = compile (T.encodeUtf8 ident) []
+        newContent = content & regexing regex . match .~ newName
+        editRange = wholeRange (Just content) -- newContent can be longer...
+    pure $! workspaceEditValue fp editRange newContent
+    `catch` \PatternMatchFail {} -> pure Null
 
 prepareRename :: Value -> IO Value
-prepareRename [json| { _textDocument{uri} _position{line character} } |] = do
-  Just content <- readFileMaybe $ uriToFilePath uri
-  let pos = Position line character
-  Just r <- return $ toJSON . toPrrFrom line character <$> identifierUnderCursor (Just content) pos
-  return $! r
- `catch` \PatternMatchFail {} -> pure Null
+prepareRename [json| { _textDocument{uri} _position{line character} } |] =
+  do
+    Just content <- readFileMaybe $ uriToFilePath uri
+    let pos = Position line character
+    Just r <- return $ toJSON . toPrrFrom line character <$> identifierUnderCursor (Just content) pos
+    return $! r
+    `catch` \PatternMatchFail {} -> pure Null
 
 data Position = Position
   { line :: Int,
@@ -108,6 +118,7 @@ data Range = Range
   deriving (Eq, Show, Generic)
 
 instance ToJSON Range
+
 instance ToJSON Position
 
 readFileMaybe :: FilePath -> IO (Maybe Text)

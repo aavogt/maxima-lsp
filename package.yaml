@@ -11,6 +11,7 @@ dependencies:
   - lens-aeson
   - aeson-qq
   - bytestring
+  - unix
 
 default-extensions:
   - BlockArguments

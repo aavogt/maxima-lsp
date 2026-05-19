@@ -33,5 +33,6 @@ executable maxima-lsp
     , regex-applicative
     , template-haskell
     , text
+    , unix
     , vector
   default-language: Haskell2010
