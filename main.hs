@@ -29,6 +29,8 @@ import Data.Char
 import Data.Foldable (for_, traverse_)
 import Data.Functor ((<&>))
 import Data.Int
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
@@ -59,51 +61,74 @@ message =
 
 limit resource amt = setResourceLimit resource (ResourceLimits (ResourceLimit amt) (ResourceLimit amt))
 
+type Documents = Map Text Text
+
 main :: IO ()
 main = do
   limit ResourceTotalMemory 10000
   limit ResourceCPUTime 10
+  documents <- newMVar mempty
   forever $ try @PatternMatchFail do
     m <- message
-    mr <- fmap (addContentLength . encode) <$> lsp m
+    mr <- fmap (addContentLength . encode) <$> lsp documents m
     for_ mr \r -> do
       L8.putStr r
       hFlush stdout
     threadDelay (100 * 1000) -- 0.1s
 
-lsp :: Value -> IO (Maybe Value)
-lsp [json| { method params id } |] = case method :: Text of
-  "initialize" -> pure (resp [aesonQQ| { capabilities : { renameProvider : { prepareProvider : true, workDoneProgress : false } }, textDocumentSync : 1 } |])
-  "textDocument/prepareRename" -> respIo (prepareRename params)
-  "textDocument/rename" -> respIo (rename params)
+lsp :: MVar Documents -> Value -> IO (Maybe Value)
+lsp documents [json| { method params id } |] = case method :: Text of
+  "initialize" ->
+    pure
+      ( resp
+          [aesonQQ|
+            { capabilities :
+              { renameProvider : { prepareProvider : true, workDoneProgress : false }
+              , textDocumentSync :
+                  { openClose : true
+                  , change : 1
+                  , save : { includeText : false }
+                  }
+              }
+            }
+          |]
+      )
+  "textDocument/prepareRename" -> respIo (prepareRename documents params)
+  "textDocument/rename" -> respIo (rename documents params)
   _ -> pure Nothing
   where
     resp (result :: Value) = Just [aesonQQ| { jsonrpc: "2.0", id : #{id :: Int}, result : #{result} } |]
     respIo ioResult = ioResult <&> resp
-lsp _ = return Nothing
+lsp documents [json| { method params } |] = do
+  handleNotification documents method params
+  pure Nothing
+lsp _ _ = return Nothing
 
-rename :: Value -> IO Value
-rename [json| { _textDocument{uri} _position{line character} newName } |] =
+rename :: MVar Documents -> Value -> IO Value
+rename documents [json| { _textDocument{uri} _position{line character} newName } |] =
   do
-    let fp = uriToFilePath uri
-        pos = Position line character
-    Just content <- readFileMaybe fp
-    let Just (left, right) = identifierUnderCursor (Just content) pos
-    let ident = left <> right
-        regex = compile (T.encodeUtf8 ident) []
-        newContent = content & regexing regex . match .~ newName
-        editRange = wholeRange (Just content) -- newContent can be longer...
-    pure $! workspaceEditValue fp editRange newContent
-    `catch` \PatternMatchFail {} -> pure Null
+    mcontent <- getDocumentContent documents uri
+    case mcontent of
+      Nothing -> pure Null
+      Just content -> do
+        let pos = Position line character
+        let Just (left, right) = identifierUnderCursor (Just content) pos
+        let ident = left <> right
+            regex = compile (T.encodeUtf8 ident) []
+            newContent = content & regexing regex . match .~ newName
+            editRange = wholeRange (Just content) -- newContent can be longer...
+        pure $! workspaceEditValue (uriToFilePath uri) editRange newContent
 
-prepareRename :: Value -> IO Value
-prepareRename [json| { _textDocument{uri} _position{line character} } |] =
+prepareRename :: MVar Documents -> Value -> IO Value
+prepareRename documents [json| { _textDocument{uri} _position{line character} } |] =
   do
-    Just content <- readFileMaybe $ uriToFilePath uri
-    let pos = Position line character
-    Just r <- return $ toJSON . toPrrFrom line character <$> identifierUnderCursor (Just content) pos
-    return $! r
-    `catch` \PatternMatchFail {} -> pure Null
+    mcontent <- getDocumentContent documents uri
+    case mcontent of
+      Nothing -> pure Null
+      Just content -> do
+        let pos = Position line character
+        Just r <- return $ toJSON . toPrrFrom line character <$> identifierUnderCursor (Just content) pos
+        return $! r
 
 data Position = Position
   { line :: Int,
@@ -125,6 +150,32 @@ readFileMaybe :: FilePath -> IO (Maybe Text)
 readFileMaybe fp = do
   result <- try (T.readFile fp) :: IO (Either IOException Text)
   pure (either (const Nothing) Just result)
+
+handleNotification :: MVar Documents -> Text -> Value -> IO ()
+handleNotification documents method params = case method :: Text of
+  "textDocument/didOpen" ->
+    case params of
+      [json| { textDocument{ uri text } } |] ->
+        modifyMVar_ documents (pure . Map.insert uri text)
+      _ -> pure ()
+  "textDocument/didChange" ->
+    case params of
+      [json| { _textDocument{ uri } _contentChanges[ { text } ] } |] ->
+        modifyMVar_ documents (pure . Map.insert uri text)
+      _ -> pure ()
+  "textDocument/didClose" ->
+    case params of
+      [json| { textDocument{ uri } } |] ->
+        modifyMVar_ documents (pure . Map.delete uri)
+      _ -> pure ()
+  _ -> pure ()
+
+getDocumentContent :: MVar Documents -> Text -> IO (Maybe Text)
+getDocumentContent documents uri = do
+  docMap <- readMVar documents
+  case Map.lookup uri docMap of
+    Just content -> pure (Just content)
+    Nothing -> readFileMaybe (uriToFilePath uri)
 
 identifierUnderCursor :: Maybe Text -> Position -> Maybe (Text, Text)
 identifierUnderCursor mp (Position n c) =

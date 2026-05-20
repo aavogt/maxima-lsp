@@ -1,9 +1,16 @@
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE ViewPatterns #-}
 
--- | Description : pun-style quasiquoter for Aeson 'Value'
+{- HLINT ignore "Use fmap" -}
+
+-- | Description : pun-style quasiquoter for Aeson 'Value' / instances of FromJSON
 --
--- Reuses the parser from "Data.HList.RecordPuns"; field names are plain
+-- Adapts the parser from "Data.HList.RecordPuns"; field names are plain
 -- Haskell identifiers (fine for LSP, where every key is lowercase ASCII).
 --
 -- [@patterns@]
@@ -18,10 +25,21 @@
 -- >>> Just [json| params{textDocument{uri} position{line character}} |] = decode "..."
 -- -- uri, line, character :: Maybe Value
 --
--- Array fields use @( )@:
+-- a leading underscores means the json field is accessed but the value is not bound
+-- to a haskell variable.
 --
--- >>> Just [json| result(a b) |] = decode "{\"result\":[1,2]}"
+-- Array fields use @[ ]@:
+--
+-- >>> Just [json| result[a b] |] = decode "{\"result\":[1,2]}"
 -- -- a, b :: Value
+--
+-- TODO: extra fields are always accepted
+-- TODO: no way to get b :: Maybe Value
+-- TODO: avoid Pun.nth instead of
+-- (\ (jsonArray -> a_ahi5) -> Just [(nth a_ahi5 0 >>= jsonGet "text")]))) -> Just [Just text]
+-- (jsonArray -> Just [jsonGet "text" -> Just text])
+--
+-- expressions not tested/used
 --
 -- [@expressions@]
 --
@@ -42,23 +60,132 @@
 module Pun
   ( json,
 
-    -- * Helpers used in generated splices
+    -- * names in generated splices
+    -- $suggestion
+    -- import Pun (json)
+    -- unless you're looking at ghc -ddump-splices
+    Value,
     jsonGet,
-    jsonMerge,
+    tupleE,
+    jsonArray,
+    (^?),
+    _Just,
+    _JSON,
+    ix,
+    (&),
+    nth,
   )
 where
 
-import Control.Lens hiding ((.=))
+import Control.Lens hiding (contains, inside, (.=))
+import Control.Monad
+import Control.Monad.Trans.Reader
 import Data.Aeson (FromJSON, Result (..), ToJSON, Value (..), fromJSON, object, (.=))
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KM
-import Data.Aeson.Lens
-import Data.List (isPrefixOf, unfoldr)
+import Data.Aeson.Lens hiding (nth)
+import Data.List (isPrefixOf, stripPrefix, unfoldr)
+import Data.Maybe
 import qualified Data.Vector as V
 import Language.Haskell.TH
 import Language.Haskell.TH.Quote
 
-makePrisms ''Result
+-- | In this section define types to simplify view pattern construction
+-- whereas template-haskell defines Exp and ExpQ = Q Exp
+-- we define EP and EPM = M EP
+--
+-- >  M t = Tag -> t
+-- >   EP = M EP_
+-- >   EP_ ~ (ExpQ, Maybe PatQ)
+-- >   EP = Tag -> (ExpQ, Maybe PagQ)
+type M = Reader Tag
+
+data Tag
+  = -- | @{ }@  → JSON mx curly
+    C
+  | -- | @[ ]@  array
+    A
+  | -- | @( )@  → JSON Just x next free lettter
+    D
+  deriving (Show, Eq)
+
+-- | EP expression pattern `data Pat = ViewP Exp Pat | ...`
+--
+-- with a leading _, `_foo` store Nothing instead of wildP
+data EP = EP ExpQ (Maybe PatQ)
+
+type EPM = M EP
+
+makeFields ''EP
+
+ep0 :: ExpQ -> EP
+ep0 e = EP e Nothing
+
+ep1 :: ExpQ -> PatQ -> EP
+ep1 e p = EP e (Just p)
+
+epm0 :: ExpQ -> EPM
+epm0 = pure . ep0
+
+-- could be a pattern synonym
+epm :: ExpQ -> PatQ -> EPM
+epm e p = pure (ep1 e p)
+
+tupleE f g x = Just (f x, g x)
+
+-- | horizontal
+instance Semigroup EP where
+  EP e Nothing <> EP f q = EP (e >> f) q
+  EP e p <> EP f Nothing = EP (f >> e) p
+  EP e (Just p) <> EP f (Just q) = ep1 [|($e `tupleE` $f)|] [p|Just ($p, $q)|]
+
+instance Monoid EP where
+  mempty = EP [|id|] Nothing
+
+instance Semigroup EPM where
+  a <> b = liftA2 (<>) a b
+
+instance Monoid EPM where
+  mempty = pure mempty
+
+-- | vertical
+contains_ :: EP -> EP -> EP
+contains_ (EP f Nothing) (EP g q) = EP [|$f >=> $g|] q
+contains_ (EP f (Just p)) (EP g (Just q)) = ep1 [|\v -> let fv = $f v in (fv, fv >>= $g)|] [p|($p, $q)|]
+contains_ fp (EP g Nothing) = fp
+
+infixr 6 `contains_`
+
+contains :: EPM -> EPM -> EPM
+contains = liftA2 contains_
+
+nth :: (FromJSON a, ToJSON a, AsJSON a) => Maybe [a] -> Int -> Maybe a
+nth a i = a ^? _Just . ix i . _JSON
+
+epList :: ExpQ -> [EPM] -> EPM
+-- epList e [f] = ep0 e `contains` f
+epList e esps = do
+  (es, ps) <- unzip <$> sequenceEPs esps
+  let n = length es
+  epm
+    [|
+      \($e -> a) ->
+        Just
+          $( listE
+               [ [|nth a i >>= $e|]
+                 | (i, e) <- zip [0 :: Int ..] es
+               ]
+           )
+      |]
+    [p|Just $(listP ps)|]
+
+sequenceEPs :: [EPM] -> M [(ExpQ, PatQ)]
+sequenceEPs eps = do
+  s <- ask
+  pure $ mapMaybe (_2 id . epTuple . (`runReader` s)) eps
+
+epTuple :: EP -> (ExpQ, Maybe PatQ)
+epTuple (EP a b) = (a, b)
 
 -- ── Runtime helpers ───────────────────────────────────────────────────────────
 
@@ -66,41 +193,44 @@ makePrisms ''Result
 jsonGet :: (FromJSON a, ToJSON a) => String -> Value -> Maybe a
 jsonGet k o = o ^? key (Key.fromString k) . _JSON
 
+jsonArray :: Value -> Maybe [Value]
+jsonArray (Array vec) = Just (V.toList vec)
+jsonArray _ = Nothing
+
 -- | Left-biased shallow merge of two Objects (non-Objects pass through as-is).
 jsonMerge :: Value -> Value -> Value
 jsonMerge (Object a) (Object b) = Object (a <> b)
 jsonMerge a _ = a
 
 -- ── Parser (verbatim from Data.HList.RecordPuns) ──────────────────────────────
-
 data Tree
-  = -- | @{ }@  → JSON mx
-    C [Tree]
-  | -- | @( )@  → JSON Just x
-    D [Tree]
-  | -- | @[ ]@  array
-    A [Tree]
+  -- | branch tagged with the parenthesis type
+  = B Tag [Tree]
   | -- | variable / label
     V String
   deriving (Show)
 
 ppTree :: Tree -> String
-ppTree (C ts) = "{" ++ unwords (map ppTree ts) ++ "}"
-ppTree (D ts) = "(" ++ unwords (map ppTree ts) ++ ")"
+ppTree (B tag ts) = wrap tag $ unwords (map ppTree ts)
+  where
+    wrap = \case
+      C -> \inside -> "{" ++ inside ++ "}"
+      A -> \inside -> "[" ++ inside ++ "]"
+      D -> \inside -> "[" ++ inside ++ "]"
 ppTree (V x) = x
 
 parseRec :: String -> Tree
 parseRec str = case parseRec' 0 0 0 [[]] (lexing str) of
   [x] -> x
-  xs -> C (reverse xs)
+  xs -> B C (reverse xs)
 
 parseRec' :: Int -> Int -> Int -> [[Tree]] -> [String] -> [Tree]
-parseRec' n m o acc ("{" : rest) = parseRec' (n + 1) m o ([] : acc) rest
-parseRec' n m o acc ("(" : rest) = parseRec' n (m + 1) o ([] : acc) rest
-parseRec' n m o acc ("[" : rest) = parseRec' n m (o + 1) ([] : acc) rest
-parseRec' n m o (a : b : c) ("}" : rest) = parseRec' (n - 1) m o ((C (reverse a) : b) : c) rest
-parseRec' n m o (a : b : c) (")" : rest) = parseRec' n (m - 1) o ((D (reverse a) : b) : c) rest
-parseRec' n m o (a : b : c) ("]" : rest) = parseRec' n m (o - 1) ((A (reverse a) : b) : c) rest
+parseRec' n m o acc         ("{" : rest) = parseRec' (n + 1) m o ([] : acc) rest
+parseRec' n m o acc         ("(" : rest) = parseRec' n (m + 1) o ([] : acc) rest
+parseRec' n m o acc         ("[" : rest) = parseRec' n m (o + 1) ([] : acc) rest
+parseRec' n m o (a : b : c) ("}" : rest) = parseRec' (n - 1) m o ((B C (reverse a) : b) : c) rest
+parseRec' n m o (a : b : c) (")" : rest) = parseRec' n (m - 1) o ((B D (reverse a) : b) : c) rest
+parseRec' n m o (a : b : c) ("]" : rest) = parseRec' n m (o - 1) ((B A (reverse a) : b) : c) rest
 parseRec' n m o (b : c) (a : rest)
   | a `notElem` ["{", "}", "(", ")"] = parseRec' n m o ((V a : b) : c) rest
 parseRec' 0 0 0 (a : _) [] = a
@@ -136,16 +266,15 @@ json =
 
 -- | Wrap a bare @V x@ in @C [V x]@ (implicit braces at top level).
 addRoot :: Tree -> Tree
-addRoot (V a) = C [V a]
+addRoot (V a) = B C [V a]
 addRoot t = t
 
 -- ── Expression ────────────────────────────────────────────────────────────────
-
 jExp :: Tree -> ExpQ
-jExp (C as) = [|object $(listE (map mkPair (jMes as)))|]
+jExp (B C as) = [|object $(listE (map mkPair (jMes as)))|]
   where
     mkPair (l, e) = [|Key.fromString $(litE (stringL l)) .= $e|]
-jExp (D as) = [|toJSON $(listE (map jExpElem as))|]
+jExp (B D as) = [|toJSON $(listE (map jExpElem as))|]
   where
     jExpElem (V a) = varE (mkName a)
     jExpElem t = jExp t
@@ -153,65 +282,52 @@ jExp (V a) = varE (mkName a) -- should only appear inside mes
 
 jMes :: [Tree] -> [(String, ExpQ)]
 jMes (V a : V "@" : b : rest) = (a, [|jsonMerge $(jExp b) $(varE (mkName a))|]) : jMes rest
-jMes (V a : C b : rest) = (a, jExp (C b)) : jMes rest
-jMes (V a : D b : rest) = (a, jExp (D b)) : jMes rest
+jMes (V a : B t b : rest) = (a, jExp (B t b)) : jMes rest
 jMes (V a : rest) = (a, varE (mkName a)) : jMes rest
 jMes [] = []
 jMes inp = error $ "Data.Aeson.QQ.Pun.jMes: unexpected: " ++ show (map ppTree inp)
 
 -- ── Pattern ───────────────────────────────────────────────────────────────────
-
--- | Object pattern: view function extracts a tuple of @Maybe Value@,
--- one per non-wildcard field.
-jpatCD f as = do
-  v <- newName "v"
-  let (extracts, ps) = unzip (jMpsFlat [|Just $(varE v)|] as)
-  viewP (lamE [varP v] (tupE extracts)) (tupP (map f ps))
-
 jPat :: Tree -> PatQ
-jPat (C as) = jpatCD id as
-jPat (D as) = jpatCD (\q -> [p|Just $q|]) as
-jPat (A as) =
-  let ps = jArrMps as
-   in viewP
-        [|\v -> case v of Array vec -> Just (V.toList vec); _ -> Nothing|]
-        [p|Just $(listP ps)|]
-jPat (V a) = varP (mkName a)
+jPat tree = case jPat1 tree `runReader` C of
+  EP e (Just p) -> [p|($e -> $p)|]
+  _ -> wildP
 
--- | Each entry is @(extractExp, patQ)@ where patQ matches @Maybe Value@.
--- The extractExp produces a @Maybe Value@ for the corresponding field.
-jMpsFlat :: ExpQ -> [Tree] -> [(ExpQ, PatQ)]
-jMpsFlat base (V "_" : rest) = (base >> [|const Nothing|], wildP) : jMpsFlat base rest
-jMpsFlat base (V a : C b : rest) =
-  let (field, discard) = stripDiscardSigil a
-      next = [|$base >>= jsonGet $(litE (stringL field))|]
-   in if discard
-        then jMpsFlat next b ++ jMpsFlat base rest
-        else (next, conP 'Just [jPat (C b)]) : jMpsFlat base rest
-jMpsFlat base (V a : D b : rest) =
-  let (field, discard) = stripDiscardSigil a
-      next = [|$base >>= jsonGet $(litE (stringL field))|]
-   in if discard
-        then jMpsFlat next b ++ jMpsFlat base rest
-        else (next, conP 'Just [jPat (D b)]) : jMpsFlat base rest
-jMpsFlat base (V a : rest) =
-  let (field, discard) = stripDiscardSigil a
-      next = [|$base >>= jsonGet $(litE (stringL field))|]
-      pat = if discard then wildP else varP (mkName a)
-   in (next, conP 'Just [pat]) : jMpsFlat base rest
-jMpsFlat _ [] = []
-jMpsFlat _ inp = error $ "Data.Aeson.QQ.Pun.jMpsFlat: unexpected: " ++ show (map ppTree inp)
+jPat1 :: Tree -> EPM
+jPat1 (V (unesc -> EV wasOdd a))
+  | wasOdd = epm0 [|jsonGet @Value a|] -- wildP
+  | otherwise = do
+    tag <- ask
+    let e = if tag == A then [|Just|] else [|jsonGet a|]
+        addJust
+            | tag /= D = \r -> [p| Just $r |]
+            | otherwise = id
+    epm e (addJust (varP (mkName a)))
+jPat1 (B C (V a : B cd xs : rest)) =
+  let ma    = jPat1 (V a)
+      mxs   = jPat1 (B cd xs)
+      mrest = jPat1 (B C rest)
+   in enter cd $ (ma `contains` mxs) <> mrest
+jPat1 (B t xs) = enter t $ case t of
+  A -> epList [|jsonArray|] $ map jPat1 xs
+  _ -> foldMap jPat1 xs
 
-stripDiscardSigil :: String -> (String, Bool)
-stripDiscardSigil name = case name of
-  '_' : rest@(_ : _) -> (rest, True)
-  _ -> (name, False)
+data EV = EV { wasOdd :: Bool, str :: String }
 
--- | Each entry is a patQ matching a @Value@ (no Maybe — these are list elements).
-jArrMps :: [Tree] -> [PatQ]
-jArrMps (V "_" : rest) = wildP : jArrMps rest
-jArrMps (V a : rest) = varP (mkName a) : jArrMps rest
-jArrMps (C b : rest) = jPat (C b) : jArrMps rest
-jArrMps (D b : rest) = jPat (D b) : jArrMps rest
-jArrMps [] = []
-jArrMps inp = error $ "Data.Aeson.QQ.Pun.jArrMps: unexpected: " ++ show (map ppTree inp)
+-- | unescaping
+--
+-- given @2 * n + k@ leading underscores (k is 0 or 1),
+-- EV (k==1) (n leading underscores)
+--
+-- > __ -> _
+-- > _x -> x
+unesc :: String -> EV
+unesc a
+  | (underscores, xs) <- span (=='_') a,
+    let n = length underscores,
+    even n
+      = EV False (replicate (div n 2) '_' ++ xs)
+  | Just a <- stripPrefix "_" a = EV True a
+  | otherwise = EV False a
+
+enter t = local (const t)

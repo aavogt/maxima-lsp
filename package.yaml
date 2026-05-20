@@ -12,6 +12,8 @@ dependencies:
   - aeson-qq
   - bytestring
   - unix
+  - containers
+  - transformers
 
 default-extensions:
   - BlockArguments
