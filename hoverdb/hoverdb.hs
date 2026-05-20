@@ -28,7 +28,7 @@ makePrisms ''Tag
 
 main = do
   -- https://maxima.sourceforge.io/docs/manual/maxima_singlepage.html
-  ts <- parseTags <$> TL.readFile "deps/maxima_singlepage.html"
+  ts <- parseTags <$> TL.readFile "../deps/maxima_singlepage.html"
 
   -- index
   let es :: [(TL.Text, TL.Text)]
