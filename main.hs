@@ -1,34 +1,14 @@
-{-# LANGUAGE ApplicativeDo #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DuplicateRecordFields #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE QuasiQuotes #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE TypeOperators #-}
-{-# LANGUAGE ViewPatterns #-}
-{-# OPTIONS_GHC -ddump-splices #-}
-
-module Main where
-
 import Control.Concurrent
-import Control.Exception (IOException, PatternMatchFail (..), SomeException (..), catch, try)
+import Control.Exception
 import Control.Lens
 import Control.Lens.Regex.Text
 import Control.Monad
-import Data.Aeson (FromJSON, Result (..), Value (..), decodeStrict, encode, fromJSON)
-import Data.Aeson.Decoding (decode)
+import Data.Aeson
 import Data.Aeson.QQ
-import Data.Aeson.Types (ToJSON (toJSON))
 import qualified Data.ByteString.Char8 as C8
-import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Lazy.Char8 as L8
 import Data.Char
-import Data.Foldable (for_, traverse_)
-import Data.Functor ((<&>))
-import Data.Int
+import Data.Foldable
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -41,6 +21,8 @@ import System.IO
 import System.Posix.Resource
 import Text.Regex.Applicative hiding (match)
 import Text.Regex.PCRE.Light (compile)
+
+import LoadHover
 
 contentLength :: (Read a) => RE Char a
 contentLength = do
@@ -57,8 +39,11 @@ message =
     Just (n, _) <- C8.getLine <&> findLongestPrefixWithUncons C8.uncons contentLength
     C8.getLine
     maybe message return . decode =<< L8.hGet stdin n
-    `catch` \SomeException {} -> message
+    `catch` \SomeException {} -> do
+      threadDelay (100 * 1000)
+      message
 
+limit :: Resource -> Integer -> IO ()
 limit resource amt = setResourceLimit resource (ResourceLimits (ResourceLimit amt) (ResourceLimit amt))
 
 type Documents = Map Text Text
@@ -67,8 +52,9 @@ main :: IO ()
 main = do
   limit ResourceTotalMemory 10000
   limit ResourceCPUTime 10
+  hover :: Text -> IO (Maybe Text) <- lmdbHover
   documents <- newMVar mempty
-  forever $ try @PatternMatchFail do
+  forever do
     m <- message
     mr <- fmap (addContentLength . encode) <$> lsp documents m
     for_ mr \r -> do
@@ -98,37 +84,31 @@ lsp documents [json| { method params id } |] = case method :: Text of
   _ -> pure Nothing
   where
     resp (result :: Value) = Just [aesonQQ| { jsonrpc: "2.0", id : #{id :: Int}, result : #{result} } |]
-    respIo ioResult = ioResult <&> resp
+    respIo ioResult = do
+      r <- ioResult `catch` \SomeException{} -> pure Null
+      pure (resp r)
 lsp documents [json| { method params } |] = do
   handleNotification documents method params
   pure Nothing
 lsp _ _ = return Nothing
 
 rename :: MVar Documents -> Value -> IO Value
-rename documents [json| { _textDocument{uri} _position{line character} newName } |] =
-  do
-    mcontent <- getDocumentContent documents uri
-    case mcontent of
-      Nothing -> pure Null
-      Just content -> do
-        let pos = Position line character
-        let Just (left, right) = identifierUnderCursor (Just content) pos
-        let ident = left <> right
-            regex = compile (T.encodeUtf8 ident) []
-            newContent = content & regexing regex . match .~ newName
-            editRange = wholeRange (Just content) -- newContent can be longer...
-        pure $! workspaceEditValue (uriToFilePath uri) editRange newContent
+rename documents [json| { _textDocument{uri} _position{line character} newName } |] = do
+  Just content <- getDocumentContent documents uri
+  let pos = Position line character
+  let Just (left, right) = identifierUnderCursor (Just content) pos
+  let ident = left <> right
+      regex = compile (T.encodeUtf8 ident) []
+      newContent = content & regexing regex . match .~ newName
+      editRange = wholeRange (Just content) -- newContent can be longer...
+  pure $! workspaceEditValue (uriToFilePath uri) editRange newContent
 
 prepareRename :: MVar Documents -> Value -> IO Value
-prepareRename documents [json| { _textDocument{uri} _position{line character} } |] =
-  do
-    mcontent <- getDocumentContent documents uri
-    case mcontent of
-      Nothing -> pure Null
-      Just content -> do
-        let pos = Position line character
-        Just r <- return $ toJSON . toPrrFrom line character <$> identifierUnderCursor (Just content) pos
-        return $! r
+prepareRename documents [json| { _textDocument{uri} _position{line character} } |] = do
+  Just content <- getDocumentContent documents uri
+  let pos = Position line character
+  Just r <- return $ toJSON . toPrrFrom line character <$> identifierUnderCursor (Just content) pos
+  return $! r
 
 data Position = Position
   { line :: Int,

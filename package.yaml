@@ -1,3 +1,5 @@
+name: maxima-lsp
+
 dependencies:
   - base
   - lens
@@ -14,15 +16,47 @@ dependencies:
   - unix
   - containers
   - transformers
+  - process
+  - lmdb-simple
+  - directory
+  - split
+  - unliftio
 
 default-extensions:
+  - ApplicativeDo
   - BlockArguments
-  - RecordWildCards
-  - RecordPuns
   - DataKinds
+  - DeriveGeneric
+  - DuplicateRecordFields
+  - FlexibleContexts
+  - FlexibleInstances
+  - LambdaCase
+  - OverloadedStrings
+  - QuasiQuotes
+  - RecordPuns
+  - RecordWildCards
+  - ScopedTypeVariables
+  - TemplateHaskell
+  - TypeApplications
   - TypeOperators
+  - ViewPatterns
 
-executable:
-  source-dirs: .
-  main:
-    main.hs
+source-dirs: .
+
+
+data-files: hoverdb.lmdb
+
+executables:
+  maxima-lsp:
+    main:
+      main.hs
+
+  make-hoverdb:
+    dependencies:
+      - xz
+      - tagsoup
+      - PyF
+    ghc-options:
+      - -threaded -rtsopts "-with-rtsopts=-N"
+    main:
+      hoverdb.hs
