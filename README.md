@@ -1,5 +1,10 @@
 # maxima-lsp
 
+maxima-lsp supports
+
+ - `textDocument/rename` via a global regex search/replace rather than something like deps/nparse.lisp
+ - `textDocument/hover` which checks the index of https://maxima.sourceforge.io/docs/manual/maxima_singlepage.html
+
 ## installation
 
 
@@ -11,7 +16,9 @@ cd pcre-8.45/
 ./configure --prefix=/usr
 sudo checkinstall --pkgname=libpcre3-mydev --pkgversion=8.45 --backup=no --nodoc make install
 
-git clone https://github.com/aavogt/maxima-lsp && cd maxima-lsp && cabal install
+sudo apt install python3-html2text # TODO missing many here
+
+git clone https://github.com/aavogt/maxima-lsp && cd maxima-lsp && make
 ```
 
 
@@ -45,8 +52,3 @@ vim.api.nvim_create_autocmd("FileType", {
 })
 lspconfig.maxima_lsp.setup({})
 ```
-
-
-## TODO
-
-just does a global regex search/replace instead of deps/nparse.lisp
