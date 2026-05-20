@@ -1,0 +1,8 @@
+TAGS
+tags
+.ghci
+.ghc.environment.*
+dist-newstyle/
+hoverdb/dist-newstyle/
+hoverdb/hoverdb.lmdb
+hoverdb/hoverdb.lmdb-lock
