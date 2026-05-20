@@ -50,26 +50,28 @@ type Documents = Map Text Text
 
 main :: IO ()
 main = do
-  limit ResourceTotalMemory 10000
+  limit ResourceTotalMemory (1024 * 1024 * 1024 * 1024 * 1024)
   limit ResourceCPUTime 10
-  hover :: Text -> IO (Maybe Text) <- lmdbHover
+  findHover <- lmdbHover
   documents <- newMVar mempty
   forever do
     m <- message
-    mr <- fmap (addContentLength . encode) <$> lsp documents m
+    mr <- fmap (addContentLength . encode) <$> lsp findHover documents m
     for_ mr \r -> do
       L8.putStr r
       hFlush stdout
     threadDelay (100 * 1000) -- 0.1s
 
-lsp :: MVar Documents -> Value -> IO (Maybe Value)
-lsp documents [json| { method params id } |] = case method :: Text of
+
+lsp :: (Text -> IO (Maybe Text)) -> MVar Documents -> Value -> IO (Maybe Value)
+lsp findHover documents [json| { method params id } |] = case method :: Text of
   "initialize" ->
     pure
       ( resp
           [aesonQQ|
             { capabilities :
               { renameProvider : { prepareProvider : true, workDoneProgress : false }
+              , hoverProvider : true
               , textDocumentSync :
                   { openClose : true
                   , change : 1
@@ -81,16 +83,36 @@ lsp documents [json| { method params id } |] = case method :: Text of
       )
   "textDocument/prepareRename" -> respIo (prepareRename documents params)
   "textDocument/rename" -> respIo (rename documents params)
+  "textDocument/hover" -> respIo (findHoverRequest findHover documents params)
   _ -> pure Nothing
   where
     resp (result :: Value) = Just [aesonQQ| { jsonrpc: "2.0", id : #{id :: Int}, result : #{result} } |]
     respIo ioResult = do
       r <- ioResult `catch` \SomeException{} -> pure Null
       pure (resp r)
-lsp documents [json| { method params } |] = do
+lsp findHover documents [json| { method params } |] = do
   handleNotification documents method params
   pure Nothing
-lsp _ _ = return Nothing
+lsp _ _ _ = return Nothing
+
+findHoverRequest :: (Text -> IO (Maybe Text)) -> MVar Documents -> Value -> IO Value
+findHoverRequest findHover documents [json| { _textDocument{uri} _position{line character} } |] = do
+  content <- getDocumentContent documents uri
+  let pos = Position line character
+  let mIdent = identifierUnderCursor content pos <&> \(left, right) -> left <> right
+  hoverText <- maybe (pure Nothing) findHover mIdent
+  hPutStrLn stderr $ show (mIdent, hoverText)
+  pure $ maybe Null hoverResult hoverText
+  where
+    hoverResult txt =
+      [aesonQQ|
+        { contents:
+            { kind: "markdown"
+            , value: #{txt}
+            }
+        }
+      |]
+findHoverRequest _ _ _ = pure Null
 
 rename :: MVar Documents -> Value -> IO Value
 rename documents [json| { _textDocument{uri} _position{line character} newName } |] = do
@@ -162,7 +184,7 @@ identifierUnderCursor mp (Position n c) =
   mp ^? _Just . to T.lines . ix n
     <&> T.splitAt c
     <&> _1 . reversed %~ alphaNumThenAlpha -- allowed to be empty
-    <&> _2 %~ T.takeWhile isAlphaNum
+    <&> _2 %~ T.takeWhile (\c -> isAlphaNum c || c == '_')
 
 wholeRange :: Maybe Text -> Range
 wholeRange mp = Range (Position 0 0) (Position endLine endChar)
@@ -182,7 +204,7 @@ rangeLine line c1 c2 = Range (Position line (max 0 c1)) (Position line (max 0 c2
 alphaNumThenAlpha :: Text -> Text
 alphaNumThenAlpha =
   (maybe "" fst .) . findLongestPrefixWithUncons T.uncons $ do
-    xs <- many (psym isAlphaNum)
+    xs <- many (psym isAlphaNum <|> sym '_')
     x <- psym isAlpha
     pure (T.pack xs `T.snoc` x)
 

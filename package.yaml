@@ -44,7 +44,7 @@ default-extensions:
 source-dirs: .
 
 
-data-files: hoverdb.lmdb
+data-files: hoverdb.lmdb*
 
 executables:
   maxima-lsp:

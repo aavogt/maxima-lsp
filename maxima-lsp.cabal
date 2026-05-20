@@ -9,6 +9,7 @@ version:        0.0.0
 build-type:     Simple
 data-files:
     hoverdb.lmdb
+    hoverdb.lmdb-lock
 
 executable make-hoverdb
   main-is: hoverdb.hs
