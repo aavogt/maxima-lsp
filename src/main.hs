@@ -19,7 +19,7 @@ import System.Posix.Resource
 import Text.Regex.PCRE.Light (compile)
 
 import Ident ( identifierUnderCursor, splitPos )
-import LoadHover ( openHoverDB, HoverDB(hover, completions) )
+import DB ( openDB, DB(hover, completions) )
 import Pun (json)
 import RPC ( addContentLength, message )
 import Range ( toPrrFrom, wholeRange, rangeLine, Range )
@@ -33,7 +33,7 @@ main :: IO ()
 main = do
   limit ResourceTotalMemory (1024 * 1024 * 1024 * 1024 * 1024)
   limit ResourceCPUTime 10
-  db <- openHoverDB
+  db <- openDB
   documents <- newMVar mempty
   forever do
     m <- message
@@ -44,7 +44,7 @@ main = do
     threadDelay (100 * 1000) -- 0.1s
 
 
-lsp :: HoverDB -> MVar Documents -> Value -> IO (Maybe Value)
+lsp :: DB -> MVar Documents -> Value -> IO (Maybe Value)
 lsp db documents [json| method params id |] = case method :: Text of
   "initialize" ->
       resp
@@ -81,7 +81,7 @@ lsp findHover documents [json| method params |] = do
   pure Nothing
 lsp _ _ _ = return Nothing
 
-findHoverRequest :: HoverDB -> MVar Documents -> Value -> IO Value
+findHoverRequest :: DB -> MVar Documents -> Value -> IO Value
 findHoverRequest db documents [json| _textDocument{uri} _position{line character} |] = do
   Just content <- getDocumentContent documents uri
   Just (Just hoverText) <- identifierUnderCursor content line character & _Just %%~ hover db
@@ -96,7 +96,7 @@ findHoverRequest db documents [json| _textDocument{uri} _position{line character
         }
       |]
 
-completionRequest :: HoverDB -> MVar Documents -> Value -> IO Value
+completionRequest :: DB -> MVar Documents -> Value -> IO Value
 completionRequest db documents [json| _textDocument{uri} _position{line character} |] = do
   Just content <- getDocumentContent documents uri
   items <- completionItems content line character <$> completions db
@@ -114,7 +114,7 @@ completionItems content line character =
         }
       |]
 
-completionItemResolve :: HoverDB -> Value -> IO Value
+completionItemResolve :: DB -> Value -> IO Value
 completionItemResolve db item@[json| _data{identifier} |] = do
   Just hoverText <- hover db identifier
   pure $! item `unsafeAppend` [aesonQQ| { documentation : { kind : "markdown", value : #{hoverText} } } |]

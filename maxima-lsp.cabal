@@ -14,8 +14,8 @@ data-files:
 executable maxima-lsp
   main-is: main.hs
   other-modules:
+      DB
       Ident
-      LoadHover
       Pun
       Range
       RPC
