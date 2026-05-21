@@ -5,7 +5,7 @@ all: hoverdb/hoverdb.lmdb
 .PHONY: all
 .ONESHELL:
 
-hoverdb/hoverdb.lmdb: deps/maxima_singlepage.html
+hoverdb/hoverdb.lmdb: deps/maxima_singlepage.html hoverdb/hoverdb.hs
 	cd hoverdb
 	cabal run
 
