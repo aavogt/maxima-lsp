@@ -50,14 +50,18 @@ main = do
       v <- traverse (html2text . renderTags) (M.lookup k ds)
       writeChan ch (Just (n, v))
     writeChan ch Nothing -- done
-  env <- openEnvironment "hoverdb.lmdb" defaultLimits {mapSize = 100 * 2 * 1024 * 1024}
+  env <- openEnvironment "hoverdb.lmdb" defaultLimits {mapSize = 100 * 2 * 1024 * 1024, maxDatabases = 2}
   -- single thread to write to the db
   readWriteTransaction env do
-    db <- getDatabase Nothing
+    hover <- getDatabase (Just "hover")
+    isFunc <- getDatabase (Just "isfunc")
     let loop = do
           mnv <- liftIO $ readChan ch
           case mnv of
-            Just (n, Just v) -> put db n (Just v) >> loop
+            Just (n, Just v) -> do
+              put hover n (Just v)
+              put isFunc n (Just ("Function:" `T.isPrefixOf` v))
+              loop
             Just {} -> loop
             Nothing -> return ()
     loop
