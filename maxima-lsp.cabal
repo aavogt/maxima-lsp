@@ -14,8 +14,10 @@ data-files:
 executable maxima-lsp
   main-is: main.hs
   other-modules:
+      Ident
       LoadHover
       Pun
+      RPC
       Paths_maxima_lsp
   hs-source-dirs:
       ./

@@ -20,6 +20,7 @@ openHoverDB = do
   let hover q = readOnlyTransaction env do
               db <- getDatabase Nothing
               get db q
+  -- would be better to do IO in the transaction than to allocate a list for all keys?
   let completions = readOnlyTransaction env do
         db <- getDatabase Nothing
         keys db
