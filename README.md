@@ -15,11 +15,17 @@ wget https://sourceforge.net/projects/pcre/files/latest/download
 unzip download
 cd pcre-8.45/
 ./configure --prefix=/usr
-sudo checkinstall --pkgname=libpcre3-mydev --pkgversion=8.45 --backup=no --nodoc make install
+sudo checkinstall \
+  --pkgname=libpcre3-mydev \
+  --pkgversion=8.45 \
+  --backup=no --nodoc \
+  make install
 
 sudo apt install python3-html2text # TODO missing many here
 
-git clone https://github.com/aavogt/maxima-lsp && cd maxima-lsp && make
+git clone https://github.com/aavogt/maxima-lsp
+cd maxima-lsp
+make # downloads maxima documentation and installs ~/.cabal/bin/maxima-lsp
 ```
 
 
@@ -41,7 +47,8 @@ if not configs.maxima_lsp then
     default_config = {
       cmd = { "maxima-lsp" },
       filetypes = { "maxima" },
-      root_dir = util.root_pattern(".git")(vim.uv.cwd()) or vim.uv.cwd(),
+      root_dir = util.root_pattern(".git")(vim.uv.cwd())
+                    or vim.uv.cwd(),
     },
   }
 end
