@@ -48,6 +48,7 @@ data-files: hoverdb/hoverdb.lmdb*
 
 executables:
   maxima-lsp:
+    source-dirs: src
     main:
       main.hs
 

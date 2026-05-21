@@ -22,6 +22,7 @@ executable maxima-lsp
       Paths_maxima_lsp
   hs-source-dirs:
       ./
+      src
   default-extensions:
       ApplicativeDo
       BlockArguments
