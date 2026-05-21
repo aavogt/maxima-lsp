@@ -1,6 +1,6 @@
 import Control.Concurrent
 import Control.Exception
-import Control.Lens hiding ((.=))
+import Control.Lens
 import Control.Lens.Regex.Text
 import Control.Monad
 import Data.Aeson
@@ -45,10 +45,9 @@ main = do
 
 
 lsp :: HoverDB -> MVar Documents -> Value -> IO (Maybe Value)
-lsp db documents [json| { method params id } |] = case method :: Text of
+lsp db documents [json| method params id |] = case method :: Text of
   "initialize" ->
-    pure
-      ( resp
+      resp
           [aesonQQ|
             { capabilities :
               { renameProvider : { prepareProvider : true, workDoneProgress : false }
@@ -62,7 +61,6 @@ lsp db documents [json| { method params id } |] = case method :: Text of
               }
             }
           |]
-      )
   "textDocument/prepareRename" -> respIo (prepareRename documents params)
   "textDocument/rename" -> respIo (rename documents params)
   "textDocument/hover" -> respIo (findHoverRequest db documents params)
@@ -70,11 +68,15 @@ lsp db documents [json| { method params id } |] = case method :: Text of
   "completionItem/resolve" -> respIo (completionItemResolve db params)
   _ -> pure Nothing
   where
-    resp (result :: Value) = Just [aesonQQ| { jsonrpc: "2.0", id : #{id :: Int}, result : #{result} } |]
+    resp (result :: Value) = pure $ Just [aesonQQ| { jsonrpc: "2.0", id : #{id :: Int}, result : #{result} } |]
     respIo ioResult = do
-      r <- ioResult `catch` \SomeException{} -> pure Null
-      pure (resp r)
-lsp findHover documents [json| { method params } |] = do
+      mr <- try @SomeException ioResult
+      case mr of
+        Left msg -> do
+          hPrint stderr msg
+          return Nothing
+        Right r -> resp r
+lsp findHover documents [json| method params |] = do
   handleNotification documents method params
   pure Nothing
 lsp _ _ _ = return Nothing
@@ -93,44 +95,36 @@ findHoverRequest db documents [json| _textDocument{uri} _position{line character
             }
         }
       |]
-findHoverRequest _ _ _ = pure Null
 
 completionRequest :: HoverDB -> MVar Documents -> Value -> IO Value
-completionRequest db documents [json| { _textDocument{uri} _position{line character} } |] = do
+completionRequest db documents [json| _textDocument{uri} _position{line character} |] = do
   Just content <- getDocumentContent documents uri
-  completionsList <- completions db
-  items <- completionItems content line character completionsList
+  items <- completionItems content line character <$> completions db
   pure [aesonQQ| { isIncomplete: false, items: #{items} } |]
-completionRequest _ _ _ = pure Null
 
-completionItems :: Text -> Int -> Int -> [(Text, Bool)] -> IO [Value]
-completionItems content line character identifiers = do
+completionItems :: Text -> Int -> Int -> [(Text, Bool)] -> [Value]
+completionItems content line character =
   let replaceRange = maybe (rangeLine line character character) (toPrrFrom line character) (splitPos content line character)
-  traverse (completionItemValue replaceRange) identifiers
-
-completionItemValue :: Range -> (Text, Bool) -> IO Value
-completionItemValue range (ident, isFunction) = do
-  let insertText = if isFunction then ident <> "(" else ident
-  pure
-    [aesonQQ|
-      { label: #{ident}
-      , textEdit: { range: #{range}, newText: #{insertText} }
-      , data: { identifier: #{ident} }
-      }
-    |]
+  in map \(ident, isFunction) ->
+    let insertText = if isFunction then ident <> "(" else ident
+    in [aesonQQ|
+        { label: #{ident}
+        , textEdit: { range: #{replaceRange}, newText: #{insertText} }
+        , data: { identifier: #{ident} }
+        }
+      |]
 
 completionItemResolve :: HoverDB -> Value -> IO Value
-completionItemResolve db item@[json| { _data{identifier} } |] = do
-  hoverText <- hover db identifier
-  pure $ maybe item (addDocumentation item) hoverText
-  where
-    addDocumentation (Object obj) txt =
-      Object (KM.insert "documentation" (object ["kind" .= ("markdown" :: Text), "value" .= txt]) obj)
-    addDocumentation other _ = other
-completionItemResolve _ item = pure item
+completionItemResolve db item@[json| _data{identifier} |] = do
+  Just hoverText <- hover db identifier
+  pure $! item `unsafeAppend` [aesonQQ| { documentation : { kind : "markdown", value : #{hoverText} } } |]
+
+unsafeAppend :: Value -> Value -> Value
+unsafeAppend (Object a) (Object b) = Object (a<>b)
+-- PatternMatchFail will be caught
 
 rename :: MVar Documents -> Value -> IO Value
-rename documents [json| { _textDocument{uri} _position{line character} newName } |] = do
+rename documents [json| _textDocument{uri} _position{line character} newName |] = do
   Just content <- getDocumentContent documents uri
   let Just ident = identifierUnderCursor content line character
   let regex = compile (T.encodeUtf8 ident) []
@@ -139,7 +133,7 @@ rename documents [json| { _textDocument{uri} _position{line character} newName }
   pure $! workspaceEditValue (uriToFilePath uri) editRange newContent
 
 prepareRename :: MVar Documents -> Value -> IO Value
-prepareRename documents [json| { _textDocument{uri} _position{line character} } |] = do
+prepareRename documents [json| _textDocument{uri} _position{line character} |] = do
   Just content <- getDocumentContent documents uri
   let Just r = toJSON . toPrrFrom line character <$> splitPos content line character
   return $! r
@@ -148,12 +142,12 @@ handleNotification :: MVar Documents -> Text -> Value -> IO ()
 handleNotification documents method params = case method :: Text of
   "textDocument/didOpen" ->
     case params of
-      [json| { textDocument{ uri text } } |] ->
+      [json| textDocument{ uri text } |] ->
         modifyMVar_ documents (pure . Map.insert uri text)
       _ -> pure ()
   "textDocument/didChange" ->
     case params of
-      [json| { _textDocument{ uri } _contentChanges[ { text } ] } |] ->
+      [json| _textDocument{ uri } _contentChanges[ { text } ] |] ->
         modifyMVar_ documents (pure . Map.insert uri text)
       _ -> pure ()
   "textDocument/didClose" ->
