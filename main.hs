@@ -52,19 +52,19 @@ main :: IO ()
 main = do
   limit ResourceTotalMemory (1024 * 1024 * 1024 * 1024 * 1024)
   limit ResourceCPUTime 10
-  findHover <- lmdbHover
+  db <- openHoverDB
   documents <- newMVar mempty
   forever do
     m <- message
-    mr <- fmap (addContentLength . encode) <$> lsp findHover documents m
+    mr <- fmap (addContentLength . encode) <$> lsp db documents m
     for_ mr \r -> do
       L8.putStr r
       hFlush stdout
     threadDelay (100 * 1000) -- 0.1s
 
 
-lsp :: (Text -> IO (Maybe Text)) -> MVar Documents -> Value -> IO (Maybe Value)
-lsp findHover documents [json| { method params id } |] = case method :: Text of
+lsp :: HoverDB -> MVar Documents -> Value -> IO (Maybe Value)
+lsp db documents [json| { method params id } |] = case method :: Text of
   "initialize" ->
     pure
       ( resp
@@ -83,7 +83,7 @@ lsp findHover documents [json| { method params id } |] = case method :: Text of
       )
   "textDocument/prepareRename" -> respIo (prepareRename documents params)
   "textDocument/rename" -> respIo (rename documents params)
-  "textDocument/hover" -> respIo (findHoverRequest findHover documents params)
+  "textDocument/hover" -> respIo (findHoverRequest db documents params)
   _ -> pure Nothing
   where
     resp (result :: Value) = Just [aesonQQ| { jsonrpc: "2.0", id : #{id :: Int}, result : #{result} } |]
@@ -95,10 +95,10 @@ lsp findHover documents [json| { method params } |] = do
   pure Nothing
 lsp _ _ _ = return Nothing
 
-findHoverRequest :: (Text -> IO (Maybe Text)) -> MVar Documents -> Value -> IO Value
-findHoverRequest findHover documents [json| { _textDocument{uri} _position{line character} } |] = do
+findHoverRequest :: HoverDB -> MVar Documents -> Value -> IO Value
+findHoverRequest db documents [json| { _textDocument{uri} _position{line character} } |] = do
   Just content <- getDocumentContent documents uri
-  hoverText <- traverse findHover $ identifierUnderCursor content line character
+  hoverText <- traverse (hover db) $ identifierUnderCursor content line character
   pure $ maybe Null hoverResult hoverText
   where
     hoverResult txt =
