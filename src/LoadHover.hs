@@ -1,7 +1,5 @@
 module LoadHover where
 
--- once we've run hoverdb.hs
-
 import Data.Text (Text)
 import Database.LMDB.Simple
 import Paths_maxima_lsp
@@ -9,10 +7,13 @@ import System.IO
 import Database.LMDB.Simple.Extra (toList)
 
 data HoverDB = HoverDB
-  { hover :: Text -> IO (Maybe Text),
+  { -- | get the maxima manual section
+    hover :: Text -> IO (Maybe Text),
+    -- | built-in @[(name, isFunction)]@ ie. @[("create_list", True), ("ratprint", False)]@
     completions :: IO [(Text, Bool)]
   }
 
+-- | load lmdb written by ../hoverdb/hoverdb.hs
 openHoverDB = do
   lmdb <- getDataFileName "hoverdb/hoverdb.lmdb"
   hPutStrLn stderr ("opening: " ++ lmdb)
