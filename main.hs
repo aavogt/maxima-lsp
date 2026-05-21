@@ -97,11 +97,8 @@ lsp _ _ _ = return Nothing
 
 findHoverRequest :: (Text -> IO (Maybe Text)) -> MVar Documents -> Value -> IO Value
 findHoverRequest findHover documents [json| { _textDocument{uri} _position{line character} } |] = do
-  content <- getDocumentContent documents uri
-  let pos = Position line character
-  let mIdent = identifierUnderCursor content pos <&> \(left, right) -> left <> right
-  hoverText <- maybe (pure Nothing) findHover mIdent
-  hPutStrLn stderr $ show (mIdent, hoverText)
+  Just content <- getDocumentContent documents uri
+  hoverText <- traverse findHover $ identifierUnderCursor content line character
   pure $ maybe Null hoverResult hoverText
   where
     hoverResult txt =
@@ -118,9 +115,8 @@ rename :: MVar Documents -> Value -> IO Value
 rename documents [json| { _textDocument{uri} _position{line character} newName } |] = do
   Just content <- getDocumentContent documents uri
   let pos = Position line character
-  let Just (left, right) = identifierUnderCursor (Just content) pos
-  let ident = left <> right
-      regex = compile (T.encodeUtf8 ident) []
+  let Just ident = identifierUnderCursor content line character
+  let regex = compile (T.encodeUtf8 ident) []
       newContent = content & regexing regex . match .~ newName
       editRange = wholeRange (Just content) -- newContent can be longer...
   pure $! workspaceEditValue (uriToFilePath uri) editRange newContent
@@ -128,8 +124,7 @@ rename documents [json| { _textDocument{uri} _position{line character} newName }
 prepareRename :: MVar Documents -> Value -> IO Value
 prepareRename documents [json| { _textDocument{uri} _position{line character} } |] = do
   Just content <- getDocumentContent documents uri
-  let pos = Position line character
-  Just r <- return $ toJSON . toPrrFrom line character <$> identifierUnderCursor (Just content) pos
+  let Just r = toJSON . toPrrFrom line character <$> splitPos content line character
   return $! r
 
 data Position = Position
@@ -179,12 +174,28 @@ getDocumentContent documents uri = do
     Just content -> pure (Just content)
     Nothing -> readFileMaybe (uriToFilePath uri)
 
-identifierUnderCursor :: Maybe Text -> Position -> Maybe (Text, Text)
-identifierUnderCursor mp (Position n c) =
-  mp ^? _Just . to T.lines . ix n
-    <&> T.splitAt c
-    <&> _1 . reversed %~ alphaNumThenAlpha -- allowed to be empty
-    <&> _2 %~ T.takeWhile (\c -> isAlphaNum c || c == '_')
+identifierUnderCursor :: Text -> Int -> Int -> Maybe Text
+identifierUnderCursor content line character = do
+  (left, right) <- splitPos content line character
+  guardValidIdent left right
+  Just (left <> right)
+
+guardValidIdent :: Text -> Text -> Maybe ()
+guardValidIdent left right =
+  when (T.null left) $ guard $ has (_head . filtered \c -> isAlpha c || c == '_') right
+
+splitPos :: Text -> Int -> Int -> Maybe (Text, Text)
+splitPos content line character = T.lines content ^? ix line <&> \ lineText -> lineText
+  & T.splitAt character
+  & _1 . reversed %~ alphaNumThenAlpha -- allowed to be empty
+  & _2 %~ T.takeWhile \c -> isAlphaNum c || c == '_'
+
+alphaNumThenAlpha :: Text -> Text
+alphaNumThenAlpha =
+  (maybe "" fst .) . findLongestPrefixWithUncons T.uncons $ do
+    xs <- many (psym isAlphaNum <|> sym '_')
+    x <- psym isAlpha
+    pure (T.pack xs `T.snoc` x)
 
 wholeRange :: Maybe Text -> Range
 wholeRange mp = Range (Position 0 0) (Position endLine endChar)
@@ -200,13 +211,6 @@ toPrrFrom line col (T.length -> nl, T.length -> nr) = rangeLine line (col - nl) 
 
 rangeLine :: Int -> Int -> Int -> Range
 rangeLine line c1 c2 = Range (Position line (max 0 c1)) (Position line (max 0 c2))
-
-alphaNumThenAlpha :: Text -> Text
-alphaNumThenAlpha =
-  (maybe "" fst .) . findLongestPrefixWithUncons T.uncons $ do
-    xs <- many (psym isAlphaNum <|> sym '_')
-    x <- psym isAlpha
-    pure (T.pack xs `T.snoc` x)
 
 uriToFilePath :: Text -> FilePath
 uriToFilePath uri =
