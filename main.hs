@@ -13,7 +13,6 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.IO as T
-import GHC.Generics (Generic)
 import System.IO
 import System.Posix.Resource
 import Text.Regex.PCRE.Light (compile)
@@ -22,6 +21,7 @@ import Ident
 import LoadHover
 import Pun (json)
 import RPC
+import Range
 
 limit :: Resource -> Integer -> IO ()
 limit resource amt = setResourceLimit resource (ResourceLimits (ResourceLimit amt) (ResourceLimit amt))
@@ -98,7 +98,7 @@ rename documents [json| { _textDocument{uri} _position{line character} newName }
   let Just ident = identifierUnderCursor content line character
   let regex = compile (T.encodeUtf8 ident) []
       newContent = content & regexing regex . match .~ newName
-      editRange = wholeRange (Just content) -- newContent can be longer...
+      editRange = wholeRange content -- newContent can be longer...
   pure $! workspaceEditValue (uriToFilePath uri) editRange newContent
 
 prepareRename :: MVar Documents -> Value -> IO Value
@@ -106,22 +106,6 @@ prepareRename documents [json| { _textDocument{uri} _position{line character} } 
   Just content <- getDocumentContent documents uri
   let Just r = toJSON . toPrrFrom line character <$> splitPos content line character
   return $! r
-
-data Position = Position
-  { line :: Int,
-    character :: Int
-  }
-  deriving (Eq, Show, Generic)
-
-data Range = Range
-  { start :: Position,
-    end :: Position
-  }
-  deriving (Eq, Show, Generic)
-
-instance ToJSON Range
-
-instance ToJSON Position
 
 readFileMaybe :: FilePath -> IO (Maybe Text)
 readFileMaybe fp = do
@@ -153,21 +137,6 @@ getDocumentContent documents uri = do
   case Map.lookup uri docMap of
     Just content -> pure (Just content)
     Nothing -> readFileMaybe (uriToFilePath uri)
-
-wholeRange :: Maybe Text -> Range
-wholeRange mp = Range (Position 0 0) (Position endLine endChar)
-  where
-    endLine = maybe 0 (length . T.lines) mp
-    endChar = maybe 0 T.length $ (mlast . T.lines) =<< mp
-
-    mlast [] = Nothing
-    mlast xs = Just (last xs)
-
-toPrrFrom :: Int -> Int -> (Text, Text) -> Range
-toPrrFrom line col (T.length -> nl, T.length -> nr) = rangeLine line (col - nl) (col + nr)
-
-rangeLine :: Int -> Int -> Int -> Range
-rangeLine line c1 c2 = Range (Position line (max 0 c1)) (Position line (max 0 c2))
 
 uriToFilePath :: Text -> FilePath
 uriToFilePath uri =

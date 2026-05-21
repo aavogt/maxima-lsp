@@ -17,6 +17,7 @@ executable maxima-lsp
       Ident
       LoadHover
       Pun
+      Range
       RPC
       Paths_maxima_lsp
   hs-source-dirs:
