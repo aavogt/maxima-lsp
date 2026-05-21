@@ -80,10 +80,10 @@ lsp findHover documents [json| { method params } |] = do
 lsp _ _ _ = return Nothing
 
 findHoverRequest :: HoverDB -> MVar Documents -> Value -> IO Value
-findHoverRequest db documents [json| { _textDocument{uri} _position{line character} } |] = do
+findHoverRequest db documents [json| _textDocument{uri} _position{line character} |] = do
   Just content <- getDocumentContent documents uri
-  hoverText <- traverse (hover db) $ identifierUnderCursor content line character
-  pure $ maybe Null hoverResult hoverText
+  Just (Just hoverText) <- identifierUnderCursor content line character & _Just %%~ hover db
+  pure $! hoverResult hoverText
   where
     hoverResult txt =
       [aesonQQ|
