@@ -3,7 +3,8 @@
 maxima-lsp supports
 
  - `textDocument/rename` via a global regex search/replace rather than something like deps/nparse.lisp
- - `textDocument/hover` which checks the index of https://maxima.sourceforge.io/docs/manual/maxima_singlepage.html
+ - `textDocument/hover` which shows documentation extracted from https://maxima.sourceforge.io/docs/manual/maxima_singlepage.html
+ - `textDocument/completion` lists the built-in fuctions and variables together with the hover documentation
 
 ## installation
 
