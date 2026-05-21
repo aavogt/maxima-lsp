@@ -1,9 +1,10 @@
 import Control.Concurrent
 import Control.Exception
-import Control.Lens
+import Control.Lens hiding ((.=))
 import Control.Lens.Regex.Text
 import Control.Monad
 import Data.Aeson
+import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.QQ
 import qualified Data.ByteString.Lazy.Char8 as L8
 import Data.Foldable
@@ -52,7 +53,7 @@ lsp db documents [json| { method params id } |] = case method :: Text of
             { capabilities :
               { renameProvider : { prepareProvider : true, workDoneProgress : false }
               , hoverProvider : true
-              , completionProvider : { resolveProvider : false }
+              , completionProvider : { resolveProvider : true }
               , textDocumentSync :
                   { openClose : true
                   , change : 1
@@ -66,6 +67,7 @@ lsp db documents [json| { method params id } |] = case method :: Text of
   "textDocument/rename" -> respIo (rename documents params)
   "textDocument/hover" -> respIo (findHoverRequest db documents params)
   "textDocument/completion" -> respIo (completionRequest db documents params)
+  "completionItem/resolve" -> respIo (completionItemResolve db params)
   _ -> pure Nothing
   where
     resp (result :: Value) = Just [aesonQQ| { jsonrpc: "2.0", id : #{id :: Int}, result : #{result} } |]
@@ -97,22 +99,35 @@ completionRequest :: HoverDB -> MVar Documents -> Value -> IO Value
 completionRequest db documents [json| { _textDocument{uri} _position{line character} } |] = do
   Just content <- getDocumentContent documents uri
   completionsList <- completions db
-  let items = completionItems content line character completionsList
+  items <- completionItems content line character completionsList
   pure [aesonQQ| { isIncomplete: false, items: #{items} } |]
 completionRequest _ _ _ = pure Null
 
-completionItems :: Text -> Int -> Int -> [Text] -> [Value]
-completionItems content line character identifiers =
+completionItems :: Text -> Int -> Int -> [(Text, Bool)] -> IO [Value]
+completionItems content line character identifiers = do
   let replaceRange = maybe (rangeLine line character character) (toPrrFrom line character) (splitPos content line character)
-   in fmap (completionItemValue replaceRange) identifiers
+  traverse (completionItemValue replaceRange) identifiers
 
-completionItemValue :: Range -> Text -> Value
-completionItemValue range ident =
-  [aesonQQ|
-    { label: #{ident}
-    , textEdit: { range: #{range}, newText: #{ident} }
-    }
-  |]
+completionItemValue :: Range -> (Text, Bool) -> IO Value
+completionItemValue range (ident, isFunction) = do
+  let insertText = if isFunction then ident <> "(" else ident
+  pure
+    [aesonQQ|
+      { label: #{ident}
+      , textEdit: { range: #{range}, newText: #{insertText} }
+      , data: { identifier: #{ident} }
+      }
+    |]
+
+completionItemResolve :: HoverDB -> Value -> IO Value
+completionItemResolve db item@[json| { _data{identifier} } |] = do
+  hoverText <- hover db identifier
+  pure $ maybe item (addDocumentation item) hoverText
+  where
+    addDocumentation (Object obj) txt =
+      Object (KM.insert "documentation" (object ["kind" .= ("markdown" :: Text), "value" .= txt]) obj)
+    addDocumentation other _ = other
+completionItemResolve _ item = pure item
 
 rename :: MVar Documents -> Value -> IO Value
 rename documents [json| { _textDocument{uri} _position{line character} newName } |] = do
