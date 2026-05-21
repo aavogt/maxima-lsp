@@ -94,7 +94,6 @@ findHoverRequest _ _ _ = pure Null
 rename :: MVar Documents -> Value -> IO Value
 rename documents [json| { _textDocument{uri} _position{line character} newName } |] = do
   Just content <- getDocumentContent documents uri
-  let pos = Position line character
   let Just ident = identifierUnderCursor content line character
   let regex = compile (T.encodeUtf8 ident) []
       newContent = content & regexing regex . match .~ newName
