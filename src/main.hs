@@ -144,11 +144,6 @@ prepareRename documents [json| { _textDocument{uri} _position{line character} } 
   let Just r = toJSON . toPrrFrom line character <$> splitPos content line character
   return $! r
 
-readFileMaybe :: FilePath -> IO (Maybe Text)
-readFileMaybe fp = do
-  result <- try (T.readFile fp) :: IO (Either IOException Text)
-  pure (either (const Nothing) Just result)
-
 handleNotification :: MVar Documents -> Text -> Value -> IO ()
 handleNotification documents method params = case method :: Text of
   "textDocument/didOpen" ->
@@ -174,6 +169,11 @@ getDocumentContent documents uri = do
   case Map.lookup uri docMap of
     Just content -> pure (Just content)
     Nothing -> readFileMaybe (uriToFilePath uri)
+
+readFileMaybe :: FilePath -> IO (Maybe Text)
+readFileMaybe fp = do
+  result <- try (T.readFile fp) :: IO (Either IOException Text)
+  pure (either (const Nothing) Just result)
 
 uriToFilePath :: Text -> FilePath
 uriToFilePath uri =
