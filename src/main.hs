@@ -17,11 +17,11 @@ import System.IO
 import System.Posix.Resource
 import Text.Regex.PCRE.Light (compile)
 
-import Ident
-import LoadHover
+import Ident ( identifierUnderCursor, splitPos )
+import LoadHover ( openHoverDB, HoverDB(hover, completions) )
 import Pun (json)
-import RPC
-import Range
+import RPC ( addContentLength, message )
+import Range ( toPrrFrom, wholeRange, rangeLine, Range )
 
 limit :: Resource -> Integer -> IO ()
 limit resource amt = setResourceLimit resource (ResourceLimits (ResourceLimit amt) (ResourceLimit amt))
@@ -52,6 +52,7 @@ lsp db documents [json| { method params id } |] = case method :: Text of
             { capabilities :
               { renameProvider : { prepareProvider : true, workDoneProgress : false }
               , hoverProvider : true
+              , completionProvider : { resolveProvider : false }
               , textDocumentSync :
                   { openClose : true
                   , change : 1
@@ -64,6 +65,7 @@ lsp db documents [json| { method params id } |] = case method :: Text of
   "textDocument/prepareRename" -> respIo (prepareRename documents params)
   "textDocument/rename" -> respIo (rename documents params)
   "textDocument/hover" -> respIo (findHoverRequest db documents params)
+  "textDocument/completion" -> respIo (completionRequest db documents params)
   _ -> pure Nothing
   where
     resp (result :: Value) = Just [aesonQQ| { jsonrpc: "2.0", id : #{id :: Int}, result : #{result} } |]
@@ -90,6 +92,27 @@ findHoverRequest db documents [json| { _textDocument{uri} _position{line charact
         }
       |]
 findHoverRequest _ _ _ = pure Null
+
+completionRequest :: HoverDB -> MVar Documents -> Value -> IO Value
+completionRequest db documents [json| { _textDocument{uri} _position{line character} } |] = do
+  Just content <- getDocumentContent documents uri
+  completionsList <- completions db
+  let items = completionItems content line character completionsList
+  pure [aesonQQ| { isIncomplete: false, items: #{items} } |]
+completionRequest _ _ _ = pure Null
+
+completionItems :: Text -> Int -> Int -> [Text] -> [Value]
+completionItems content line character identifiers =
+  let replaceRange = maybe (rangeLine line character character) (toPrrFrom line character) (splitPos content line character)
+   in fmap (completionItemValue replaceRange) identifiers
+
+completionItemValue :: Range -> Text -> Value
+completionItemValue range ident =
+  [aesonQQ|
+    { label: #{ident}
+    , textEdit: { range: #{range}, newText: #{ident} }
+    }
+  |]
 
 rename :: MVar Documents -> Value -> IO Value
 rename documents [json| { _textDocument{uri} _position{line character} newName } |] = do
