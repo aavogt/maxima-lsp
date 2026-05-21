@@ -129,7 +129,7 @@ rename documents [json| _textDocument{uri} _position{line character} newName |] 
   let Just ident = identifierUnderCursor content line character
   let regex = compile (T.encodeUtf8 ident) []
       newContent = content & regexing regex . match .~ newName
-      editRange = wholeRange content -- newContent can be longer...
+      editRange = wholeRange content
   pure $! workspaceEditValue (uriToFilePath uri) editRange newContent
 
 prepareRename :: MVar Documents -> Value -> IO Value

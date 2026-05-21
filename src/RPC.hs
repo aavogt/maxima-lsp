@@ -1,3 +1,5 @@
+-- roughly https://hackage-content.haskell.org/package/lsp-2.8.0.0/docs/src/Language.LSP.Server.Control.html#prependHeader
+-- doesn't skip Content-Type:
 module RPC where
 
 import Control.Concurrent
