@@ -9,7 +9,7 @@ maxima-lsp supports
 ## installation
 
 
-```
+```bash
 # libpcre3-dev is discontinued
 wget https://sourceforge.net/projects/pcre/files/latest/download
 unzip download
@@ -25,7 +25,7 @@ git clone https://github.com/aavogt/maxima-lsp && cd maxima-lsp && make
 
 ### nvim lspconfig
 
-```
+```lua
 vim.filetype.add({
   extension = {
     mac = 'maxima',
