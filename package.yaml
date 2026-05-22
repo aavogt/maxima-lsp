@@ -21,6 +21,8 @@ dependencies:
   - directory
   - split
   - unliftio
+  - pretty-simple
+  - PyF
 
 default-extensions:
   - ApplicativeDo
@@ -33,7 +35,7 @@ default-extensions:
   - LambdaCase
   - OverloadedStrings
   - QuasiQuotes
-  - RecordPuns
+  - NamedFieldPuns
   - RecordWildCards
   - ScopedTypeVariables
   - TemplateHaskell

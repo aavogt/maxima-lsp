@@ -16,6 +16,8 @@ executable maxima-lsp
   other-modules:
       DB
       Ident
+      NLex
+      NParse
       Pun
       Range
       RPC
@@ -34,7 +36,7 @@ executable maxima-lsp
       LambdaCase
       OverloadedStrings
       QuasiQuotes
-      RecordPuns
+      NamedFieldPuns
       RecordWildCards
       ScopedTypeVariables
       TemplateHaskell
@@ -42,7 +44,8 @@ executable maxima-lsp
       TypeOperators
       ViewPatterns
   build-depends:
-      aeson
+      PyF
+    , aeson
     , aeson-qq
     , base
     , bytestring
@@ -53,6 +56,7 @@ executable maxima-lsp
     , lens-regex-pcre
     , lmdb-simple
     , pcre-light
+    , pretty-simple
     , process
     , regex-applicative
     , split
