@@ -10,6 +10,7 @@ import qualified Data.ByteString.Lazy.Char8 as L8
 import Data.Foldable
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
@@ -23,6 +24,7 @@ import DB ( openDB, DB(hover, completions) )
 import Pun (json)
 import RPC ( addContentLength, message )
 import Range ( toPrrFrom, wholeRange, rangeLine, Range )
+import NParse (commentedVars)
 
 limit :: Resource -> Integer -> IO ()
 limit resource amt = setResourceLimit resource (ResourceLimits (ResourceLimit amt) (ResourceLimit amt))
@@ -99,25 +101,62 @@ findHoverRequest db documents [json| _textDocument{uri} _position{line character
 completionRequest :: DB -> MVar Documents -> Value -> IO Value
 completionRequest db documents [json| _textDocument{uri} _position{line character} |] = do
   Just content <- getDocumentContent documents uri
-  items <- completionItems content line character <$> completions db
+  items <- completionItems content line character <$> completionsWithComments db content
   pure [aesonQQ| { isIncomplete: false, items: #{items} } |]
 
-completionItems :: Text -> Int -> Int -> [(Text, Bool)] -> [Value]
+completionsWithComments :: DB -> Text -> IO [(Text, Bool, Maybe Text)]
+completionsWithComments db content = do
+  let fileCompletions = mapMaybe toCompletionWithComment (commentedVars content)
+  dbCompletions <- completions db
+  let dbItems = map (\(ident, isFunction) -> (ident, isFunction, Nothing)) dbCompletions
+  pure (fileCompletions <> dbItems)
+
+toCompletionWithComment :: (Text, (String, Bool)) -> Maybe (Text, Bool, Maybe Text)
+toCompletionWithComment (comment, (ident, isFunction)) =
+  let identText = T.pack ident
+      commentText = normalizeComment comment
+  in Just (identText, isFunction, commentText)
+
+normalizeComment :: Text -> Maybe Text
+normalizeComment comment =
+  let trimmed = T.strip comment
+  in if T.null trimmed
+       then Nothing
+       else Just trimmed
+
+completionItems :: Text -> Int -> Int -> [(Text, Bool, Maybe Text)] -> [Value]
 completionItems content line character =
   let replaceRange = maybe (rangeLine line character character) (toPrrFrom line character) (splitPos content line character)
-  in map \(ident, isFunction) ->
+  in map \(ident, isFunction, mComment) ->
     let insertText = if isFunction then ident <> "(" else ident
-    in [aesonQQ|
-        { label: #{ident}
-        , textEdit: { range: #{replaceRange}, newText: #{insertText} }
-        , data: { identifier: #{ident} }
-        }
-      |]
+        baseItem =
+          [aesonQQ|
+            { label: #{ident}
+            , textEdit: { range: #{replaceRange}, newText: #{insertText} }
+            , data: { identifier: #{ident} }
+            }
+          |]
+    in case mComment of
+        Nothing -> baseItem
+        Just comment ->
+          baseItem `unsafeAppend`
+            [aesonQQ|
+              { documentation:
+                  { kind: "markdown"
+                  , value: #{comment}
+                  }
+              }
+            |]
 
 completionItemResolve :: DB -> Value -> IO Value
-completionItemResolve db item@[json| _data{identifier} |] = do
-  Just hoverText <- hover db identifier
-  pure $! item `unsafeAppend` [aesonQQ| { documentation : { kind : "markdown", value : #{hoverText} } } |]
+completionItemResolve db item = case item of
+  [json| _data{identifier} |] -> do
+    mHoverText <- hover db identifier
+    pure $ case mHoverText of
+      Nothing -> item
+      Just hoverText ->
+        item `unsafeAppend` [aesonQQ| { documentation : { kind : "markdown", value : #{hoverText} } } |]
+  _ -> pure item
 
 unsafeAppend :: Value -> Value -> Value
 unsafeAppend (Object a) (Object b) = Object (a<>b)
