@@ -23,7 +23,9 @@ import PyF
 import Text.Pretty.Simple
 import Text.Regex.Applicative
 
-data T = T {_i :: Int, _n :: Text, _ns :: [T]} | NT {_n :: Text} deriving (Show, Eq)
+data T = T0 {_i :: Int, _n :: Text, _ns :: [T], _binds :: [Text]} | NT {_n :: Text} deriving (Show, Eq)
+
+pattern T {_i, _n, _ns} = T0 {_binds = [], ..}
 
 makePrisms ''T
 makeLenses ''T
@@ -38,7 +40,7 @@ insertT (Just i) x t
   | otherwise =
       let (children, rest) =
             span
-              (\n -> isn't _T n || _i n > i || (_i n == i && T.all isSpace (_n n)))
+              (\t0@(~T {..}) -> isn't _T0 t0 || _i > i || (_i == i && T.all isSpace _n))
               t
        in T i x children : rest
 

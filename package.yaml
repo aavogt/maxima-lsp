@@ -42,6 +42,7 @@ default-extensions:
   - TypeApplications
   - TypeOperators
   - ViewPatterns
+  - PatternSynonyms
 
 source-dirs: .
 

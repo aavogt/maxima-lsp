@@ -43,6 +43,7 @@ executable maxima-lsp
       TypeApplications
       TypeOperators
       ViewPatterns
+      PatternSynonyms
   build-depends:
       PyF
     , aeson
