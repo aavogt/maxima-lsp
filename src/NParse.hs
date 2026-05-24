@@ -2,9 +2,9 @@
 --
 -- refer to maxima's nparse.lisp ../deps/nparse.lisp
 --
--- requirements: 
+-- requirements:
 --
--- semivalid code: I can have a syntax error in one place (missing ] etc. ), but it's desirable to 
+-- semivalid code: I can have a syntax error in one place (missing ] etc. ), but it's desirable to
 -- have a best attempt on the rest of it which assumes layout can stand in for the missing delimiter
 --
 -- currently supports completions but it will also help with renaming
@@ -108,13 +108,17 @@ commentedVar = do
       <|> pure False
   pure (ident, isFunction)
 
+-- TODO trim /* */ from a?
 groupLR (Left a : Right b : xs) = (a, b) : groupLR xs
 groupLR (Left _ : xs) = groupLR xs
 groupLR (Right b : xs) = ("", b) : groupLR xs
 groupLR [] = []
 
-commentedVars :: Text -- ^ .mac file contents
-  -> [(Text, (String, Bool))] -- ^ @(leading comment, (ident, isFunction))@
+commentedVars ::
+  -- | .mac file contents
+  Text ->
+  -- | @(leading comment, (ident, isFunction))@
+  [(Text, (String, Bool))]
 commentedVars = groupLR . commentedVars1
 
 commentedVars1 input =
