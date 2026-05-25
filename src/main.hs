@@ -166,7 +166,7 @@ rename :: MVar Documents -> Value -> IO Value
 rename documents [json| _textDocument{uri} _position{line character} newName |] = do
   Just content <- getDocumentContent documents uri
   let Just ident = identifierUnderCursor content line character
-      regex = compile (T.encodeUtf8 ident) []
+      regex = compile ("\\b"<>T.encodeUtf8 ident<>"\\b") []
       fallbackContent = content & regexing regex . match .~ newName
       editRange = wholeRange content
   newContent <- case renameScoped content line character newName of
