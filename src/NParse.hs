@@ -11,22 +11,18 @@
 -- have a best attempt on the rest of it which assumes layout can stand in for the missing delimiter
 --
 -- currently supports completions but it will also help with renaming
-module NParse (commentedVars) where
+module NParse (commentedVars, renameScoped) where
 
 import Control.Applicative
 import Control.Lens
 import Control.Lens.Regex.Text (groups, match, regex, regexing)
 import Control.Lens.Unsound
 import Control.Monad
-import Control.Monad.Trans.Reader
 import Control.Zipper
 import Data.Char
 import Data.Data (Data)
 import Data.Data.Lens (template)
-import Data.Functor
-import Data.Functor.Compose
 import Data.List
-import Data.List (mapAccumL)
 import Data.Map (Map)
 import qualified Data.Map as M
 import Data.Maybe
@@ -39,7 +35,6 @@ import PyF
 import Text.Pretty.Simple
 import Text.Regex.Applicative hiding (match)
 import Text.Regex.PCRE.Light (compile)
-import Debug.Trace
 
 -- | syntax tree: _i indentation level, _j line number [1..],  _n original line, _ns children,
 -- _binds variables bound on this line probably in scope for _ns
@@ -47,7 +42,10 @@ import Debug.Trace
 -- it would be preferable to have T a = T0 { .. , _binds :: a},
 -- then T [Text] -> T (Map Text Int)
 -- but NT complicates it
-data T = T0 {_i, _j :: Int, _n :: Text, _ns :: [T], _binds :: [Text], _bindline :: Map Text Int} | NT {_j :: Int, _n :: Text} deriving (Show, Eq, Data)
+data T = T0 {_i, _j :: Int, _n :: Text, _ns :: [T], _binds :: [Text], _bindline :: Map Text Int}
+  | NT {_j :: Int, _n :: Text, _bindline :: Map Text Int} deriving (Show, Eq, Data)
+
+instance Plated T
 
 pattern T {_i, _j, _n, _ns} = T0 {_bindline = Empty, _binds = [], ..}
 
@@ -55,10 +53,10 @@ makePrisms ''T
 makeLenses ''T
 
 toTrees :: Text -> [T]
-toTrees text = map setBindsm $ addBinds $ foldr (\((i, x), j) t -> insertT i j x t) [] (scan text `zip` [1 ..])
+toTrees text = map setBindsm $ addBinds $ foldr (\((i, x), j) t -> insertT i j x t) [] (scan text `zip` [0 ..])
 
 insertT :: Maybe Int -> Int -> Text -> [T] -> [T]
-insertT Nothing j x t = NT j x : t
+insertT Nothing j x t = NT j x mempty : t
 insertT (Just i) j x t
   | T.all isSpace x = T i j x [] : t
   | otherwise =
@@ -73,8 +71,8 @@ setBindsm =
   runIdentity
     . preorderScope
       ( \m t -> Identity $ case t of
+          NT {..} -> NT {_bindline = m, ..}
           T0 {..} -> T0 {_bindline = m, ..}
-          _ -> t
       )
       mempty
 
@@ -83,36 +81,30 @@ preorderScope :: (Applicative f) => (Map Text Int -> T -> f T) -> Map Text Int -
 preorderScope f e t0@NT {} = f e t0
 preorderScope f e t0@T0 {..} = do
   let e' = M.fromList (map (,_j) _binds) <> e
-  _ns <- traversed (preorderScope f e') _ns
   ~(T0 {_ns = _, ..}) <- f e' t0
+  _ns <- traversed (preorderScope f e') _ns
   pure T0 {..}
 
 -- | don't edit _ns from T0, don't change from T0 to NS
 preorder :: Traversal' T T
 preorder f t0@NT {} = f t0
-preorder f t0@T0 {_ns = [], ..} = f t0
-preorder f t0@T0 {..} = do
-  _ns <- traversed (preorder f) _ns
-  ~(T0 {_ns = _, ..}) <- f t0
-  pure T0 {..}
+preorder f t0@T0{ _ns = []} = f t0
+preorder f t0 = do
+  t1 <- f t0
+  ns1 <- (traversed . preorder) f (t0 ^. ns)
+  pure (t1 & ns .~ ns1)
 
 renameScoped :: Text -> Int -> Int -> Text -> Either [String] Text
 renameScoped file line col newname = do
-  (_, oldname, f) <- renameScoped_ (toTrees file) line col
-  traceShow oldname (Right ())
+  (_, oldname, withRenameLine) <- renameScoped_ (toTrees file) line col
   when (null oldname) (Left ["oldname null"])
-  let regex = compile (T.encodeUtf8 (T.pack oldname)) []
-  f \line -> line & regexing regex . match .~ newname
+  let regex = compile (T.encodeUtf8 ("\\b" <> T.pack oldname <> "\\b")) []
+  withRenameLine (regexing regex . match .~ newname)
 
--- why is it so slow now...
-testSN = renameScoped "f(x) := x+y;\nx : 3;" 0 3 "z"
-
-instance Monoid a => Alternative (Either a) where
-  empty = Left mempty
-  Left a <|> Left b = Left (a <> b)
-  _      <|> Left b = Left b
-  Right a <|> _ = Right a
-instance Monoid a => MonadPlus (Either a)
+testSN :: IO Bool
+testSN = do
+  pPrint $ renameScoped "f(x) := block(x+y,\n x);\nx : 3;" 0 2 "z"
+  return False
 
 -- HasCallStack?
 -- [msg| line col |] expands to line:{line} col:{col} {prettyCallStack callStack}
@@ -123,6 +115,7 @@ f ? msg = \x -> case f <$> x of
   Right (Just a) -> Right a
   Left msg  -> Left msg
 
+-- Ident.identifierUnderCursor redone
 renameScoped_ (t :: [T]) line col =
   Right (zipper t)
     & within (traversed . preorder) ? "empty tree"
@@ -141,10 +134,10 @@ collectLRIdent t0 z =
     identBindingLine = maybe (Left ["ident:" ++ ident ++ " not in bindline" ++ show (upward z ^? focus)]) Right 
         $ upward z ^? focus . bindline . ix (T.pack ident)
     applyRename renameLine = do
-      z0 <- zipper t0 & within (traversed . preorder)
-      j <- identBindingLine
-      z1 <- jerkTo j z0 & _Right . focus . template %~ (renameLine :: Text -> Text)
-      Right $ fromTrees $ rezip z1
+      identBindingLine <&> \jTarget ->
+        let sameBinding u = u^?bindline . ix (T.pack ident) == Just jTarget
+        -- linear search by lines...
+        in fromTrees $ transformOn (traversed . filtered sameBinding) (n %~ renameLine) t0
 
 revAppend xs ys = foldl (flip (:)) ys xs
 

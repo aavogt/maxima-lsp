@@ -24,7 +24,7 @@ import DB ( openDB, DB(hover, completions) )
 import Pun (json)
 import RPC ( addContentLength, message )
 import Range ( toPrrFrom, wholeRange, rangeLine, Range )
-import NParse (commentedVars)
+import NParse (commentedVars, renameScoped)
 
 limit :: Resource -> Integer -> IO ()
 limit resource amt = setResourceLimit resource (ResourceLimits (ResourceLimit amt) (ResourceLimit amt))
@@ -166,8 +166,11 @@ rename :: MVar Documents -> Value -> IO Value
 rename documents [json| _textDocument{uri} _position{line character} newName |] = do
   Just content <- getDocumentContent documents uri
   let Just ident = identifierUnderCursor content line character
-  let regex = compile (T.encodeUtf8 ident) []
-      newContent = content & regexing regex . match .~ newName
+      regex = compile (T.encodeUtf8 ident) []
+      fallbackContent = content & regexing regex . match .~ newName
+      newContent = case renameScoped content line character newName of
+        Right scopedContent -> scopedContent
+        Left _ -> fallbackContent
       editRange = wholeRange content
   pure $! workspaceEditValue (uriToFilePath uri) editRange newContent
 
