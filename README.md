@@ -14,7 +14,7 @@ maxima-lsp supports
 wget https://sourceforge.net/projects/pcre/files/latest/download
 unzip download
 cd pcre-8.45/
-./configure --prefix=/usr
+./configure --prefix=/usr --enable-utf --enable-static=false
 sudo checkinstall \
   --pkgname=libpcre3-mydev \
   --pkgversion=8.45 \
