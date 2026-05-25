@@ -168,10 +168,12 @@ rename documents [json| _textDocument{uri} _position{line character} newName |] 
   let Just ident = identifierUnderCursor content line character
       regex = compile (T.encodeUtf8 ident) []
       fallbackContent = content & regexing regex . match .~ newName
-      newContent = case renameScoped content line character newName of
-        Right scopedContent -> scopedContent
-        Left _ -> fallbackContent
       editRange = wholeRange content
+  newContent <- case renameScoped content line character newName of
+        Right scopedContent -> return scopedContent
+        Left renameScopeFailures -> do
+            sendShowMessage (T.pack (unlines renameScopeFailures))
+            return fallbackContent
   pure $! workspaceEditValue (uriToFilePath uri) editRange newContent
 
 prepareRename :: MVar Documents -> Value -> IO Value
@@ -224,3 +226,15 @@ workspaceEditValue :: FilePath -> Range -> Text -> Value
 workspaceEditValue fp range newText =
   let uri = filePathToUri fp
    in [aesonQQ| { changes: { $uri: [ { range: #{range}, newText: #{newText} }  ] } } |]
+
+sendShowMessage :: Text -> IO ()
+sendShowMessage msg = do
+  let notification =
+        [aesonQQ|
+          { jsonrpc: "2.0"
+          , method: "window/showMessage"
+          , params: { type: 2, message: #{msg} }
+          }
+        |]
+  L8.putStr (addContentLength (encode notification))
+  hFlush stdout
