@@ -23,6 +23,8 @@ import System.IO
 import System.Process
 import Text.HTML.TagSoup
 import UnliftIO.Async
+import Text.HTML.TagSoup.Tree (tagTree, flattenTree)
+import Data.List
 
 makePrisms ''Tag
 
@@ -50,21 +52,30 @@ main = do
       v <- traverse (html2text . renderTags) (M.lookup k ds)
       writeChan ch (Just (n, v))
     writeChan ch Nothing -- done
-  env <- openEnvironment "hoverdb.lmdb" defaultLimits {mapSize = 100 * 2 * 1024 * 1024, maxDatabases = 2}
+  env <- openEnvironment "hoverdb.lmdb" defaultLimits {mapSize = 100 * 2 * 1024 * 1024, maxDatabases = 3}
   -- single thread to write to the db
   readWriteTransaction env do
     hover <- getDatabase (Just "hover")
     isFunc <- getDatabase (Just "isfunc")
+    importStatements <- getDatabase (Just "importstatements")
     let loop = do
           mnv <- liftIO $ readChan ch
           case mnv of
             Just (n, Just v) -> do
               put hover n (Just v)
               put isFunc n (Just ("Function:" `T.isPrefixOf` v))
+              put importStatements n (Just (getCategoryPackage n))
               loop
             Just {} -> loop
             Nothing -> return ()
     loop
+
+getCategoryPackage :: TL.Text -> [TL.Text]
+getCategoryPackage f = [ b | es <- map (flattenTree . (:[])) $ tagTree (openDiv (parseTags f)),
+            TagOpen "href" _ : TagText (TL.stripPrefix "Package " -> Just b) : _ <- tails es ]
+  where openDiv  = dropWhile \case
+          TagOpen "div" (lookup "class" -> Just "categorybox") -> False
+          _ -> True
 
 skipToIndexTable = dropWhile \case
   TagOpen "table" (lookup "class" -> Just "index-fn") -> False
