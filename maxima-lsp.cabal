@@ -67,4 +67,5 @@ executable maxima-lsp
     , unix
     , unliftio
     , vector
+    , zippers
   default-language: Haskell2010

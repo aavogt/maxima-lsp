@@ -23,6 +23,7 @@ dependencies:
   - unliftio
   - pretty-simple
   - PyF
+  - zippers
 
 default-extensions:
   - ApplicativeDo
