@@ -44,6 +44,8 @@ default-extensions:
   - TypeOperators
   - ViewPatterns
   - PatternSynonyms
+  - TupleSections
+  - DeriveDataTypeable
 
 source-dirs: .
 

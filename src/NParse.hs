@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveDataTypeable #-}
-{-# LANGUAGE TupleSections #-}
-
 -- |
 --
 -- refer to maxima's nparse.lisp ../deps/nparse.lisp

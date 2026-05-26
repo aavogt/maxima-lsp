@@ -44,6 +44,8 @@ executable maxima-lsp
       TypeOperators
       ViewPatterns
       PatternSynonyms
+      TupleSections
+      DeriveDataTypeable
   build-depends:
       PyF
     , aeson
