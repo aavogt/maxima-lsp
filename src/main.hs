@@ -4,7 +4,7 @@ import Control.Exception
 import Control.Lens
 import Control.Lens.Regex.Text
 import Control.Monad
-import DB (DB (completions, hover), openDB)
+import DB (DB (completions, hover, importStatements), openDB)
 import Data.Aeson
 import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.QQ
@@ -21,7 +21,7 @@ import Ident (identifierUnderCursor, splitPos)
 import NParse (commentedVars, renameScoped)
 import Pun (json)
 import RPC (addContentLength, message)
-import Range (Range, rangeLine, toPrrFrom, wholeRange)
+import Range (Position (..), Range (..), rangeLine, toPrrFrom, wholeRange)
 import System.IO
 import System.Posix.Resource
 import Text.Regex.PCRE.Light (compile)
@@ -70,7 +70,7 @@ lsp db documents [json| method params id |] = case method :: Text of
   "textDocument/rename" -> respIo (rename documents params)
   "textDocument/hover" -> respIo (findHoverRequest db documents params)
   "textDocument/completion" -> respIo (completionRequest db documents params)
-  "completionItem/resolve" -> respIo (completionItemResolve db params)
+  "completionItem/resolve" -> respIo (completionItemResolve db documents params)
   "textDocument/codeAction" -> respIo (codeActionRequest documents params)
   _ -> pure Nothing
   where
@@ -105,7 +105,7 @@ findHoverRequest db documents [json| _textDocument{uri} _position{line character
 completionRequest :: DB -> MVar Documents -> Value -> IO Value
 completionRequest db documents [json| _textDocument{uri} _position{line character} |] = do
   Just content <- getDocumentContent documents uri
-  items <- completionItems content line character <$> completionsWithComments db content
+  items <- completionItems uri content line character <$> completionsWithComments db content
   pure [aesonQQ| { isIncomplete: false, items: #{items} } |]
 
 completionsWithComments :: DB -> Text -> IO [(Text, Bool, Maybe Text)]
@@ -128,8 +128,8 @@ normalizeComment comment =
         then Nothing
         else Just trimmed
 
-completionItems :: Text -> Int -> Int -> [(Text, Bool, Maybe Text)] -> [Value]
-completionItems content line character =
+completionItems :: Text -> Text -> Int -> Int -> [(Text, Bool, Maybe Text)] -> [Value]
+completionItems uri content line character =
   let replaceRange = maybe (rangeLine line character character) (toPrrFrom line character) (splitPos content line character)
    in map \(ident, isFunction, mComment) ->
         let insertText = if isFunction then ident <> "(" else ident
@@ -137,7 +137,7 @@ completionItems content line character =
               [aesonQQ|
             { label: #{ident}
             , textEdit: { range: #{replaceRange}, newText: #{insertText} }
-            , data: { identifier: #{ident} }
+            , data: { identifier: #{ident}, uri: #{uri} }
             }
           |]
          in case mComment of
@@ -152,15 +152,31 @@ completionItems content line character =
               }
             |]
 
-completionItemResolve :: DB -> Value -> IO Value
-completionItemResolve db item = case item of
-  [json| _data{identifier} |] -> do
+completionItemResolve :: DB -> MVar Documents -> Value -> IO Value
+completionItemResolve db documents item = case item of
+  [json| _data{identifier uri} |] -> do
     mHoverText <- hover db identifier
-    pure $ case mHoverText of
-      Nothing -> item
-      Just hoverText ->
-        item `unsafeAppend` [aesonQQ| { documentation : { kind : "markdown", value : #{hoverText} } } |]
+    mContent <- getDocumentContent documents uri
+    mImports <- importStatements db identifier
+    hPrint stderr mImports
+    let baseItem = case mHoverText of
+          Nothing -> item
+          Just hoverText ->
+            item `unsafeAppend` [aesonQQ| { documentation : { kind : "markdown", value : #{hoverText} } } |]
+    pure $ maybe baseItem (addImports baseItem) (liftM2 (,) mContent mImports)
   _ -> pure item
+  where
+    addImports baseItem (content, imports) =
+      let missingImports = filter (not . hasLoadStatement content) imports
+       in if null missingImports
+            then baseItem
+            else
+              let newText = T.unlines (map loadStatement missingImports)
+                  editRange = Range (Position 0 0) (Position 0 0)
+               in baseItem
+                    `unsafeAppend` [aesonQQ| { additionalTextEdits: [ { range: #{editRange}, newText: #{newText} } ] } |]
+    loadStatement name = "load(\"" <> name <> "\")$"
+    hasLoadStatement content name = T.isInfixOf (loadStatement name) content
 
 codeActionRequest :: MVar Documents -> Value -> IO Value
 codeActionRequest documents params = case params of

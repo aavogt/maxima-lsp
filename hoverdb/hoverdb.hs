@@ -8,6 +8,7 @@ import qualified Data.ByteString.Lazy as L
 import qualified Data.ByteString.Lazy.Char8 as L8
 import Data.Char
 import Data.Foldable
+import Data.List
 import Data.List.Split
 import Data.Map (Map)
 import qualified Data.Map as M
@@ -22,9 +23,8 @@ import PyF
 import System.IO
 import System.Process
 import Text.HTML.TagSoup
+import Text.HTML.TagSoup.Tree (flattenTree, tagTree)
 import UnliftIO.Async
-import Text.HTML.TagSoup.Tree (tagTree, flattenTree)
-import Data.List
 
 makePrisms ''Tag
 
@@ -50,7 +50,8 @@ main = do
   forkIO do
     pooledForConcurrently_ es \(n, k) -> do
       v <- traverse (html2text . renderTags) (M.lookup k ds)
-      writeChan ch (Just (n, v))
+      let pkg = getCategoryPackage <$> M.lookup k ds
+      writeChan ch (Just (n, pkg, v))
     writeChan ch Nothing -- done
   env <- openEnvironment "hoverdb.lmdb" defaultLimits {mapSize = 100 * 2 * 1024 * 1024, maxDatabases = 3}
   -- single thread to write to the db
@@ -61,21 +62,32 @@ main = do
     let loop = do
           mnv <- liftIO $ readChan ch
           case mnv of
-            Just (n, Just v) -> do
+            Just (n, pkg, Just v) -> do
               put hover n (Just v)
               put isFunc n (Just ("Function:" `T.isPrefixOf` v))
-              put importStatements n (Just (getCategoryPackage n))
+              put importStatements n (pkg & _Just . traversed %~ TL.toStrict)
               loop
             Just {} -> loop
             Nothing -> return ()
     loop
 
-getCategoryPackage :: TL.Text -> [TL.Text]
-getCategoryPackage f = [ b | es <- map (flattenTree . (:[])) $ tagTree (openDiv (parseTags f)),
-            TagOpen "href" _ : TagText (TL.stripPrefix "Package " -> Just b) : _ <- tails es ]
-  where openDiv  = dropWhile \case
-          TagOpen "div" (lookup "class" -> Just "categorybox") -> False
-          _ -> True
+testCategoryPackage = ["atrig1"] == getCategoryPackage (parseTags [fmt|
+  <div class=categorybox>
+  Categories:
+  <a href="#Category_003a-Trigonometric-functions">Trigonometric functions</a>
+  &middot;
+  <a href="#Category_003a-Package-atrig1">Package atrig1</a>
+  &middot;
+  </div>|])
+
+getCategoryPackage f = nub [ b
+        | es <- map (flattenTree . (: [])) $ tagTree (openDiv f),
+          TagOpen "a" _ : TagText (TL.stripPrefix "Package " -> Just b) : _ <- tails es
+  ]
+  where
+    openDiv = dropWhile \case
+      TagOpen "div" (lookup "class" -> Just "categorybox") -> False
+      _ -> True
 
 skipToIndexTable = dropWhile \case
   TagOpen "table" (lookup "class" -> Just "index-fn") -> False
