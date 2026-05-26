@@ -7,8 +7,10 @@
 -- semivalid code: I can have a syntax error in one place (missing ] etc. ), but it's desirable to
 -- have a best attempt on the rest of it which assumes layout can stand in for the missing delimiter
 --
--- currently supports completions but it will also help with renaming
-module NParse (commentedVars, renameScoped) where
+-- currently supports completions and renaming,
+-- it may also help with common subexpression elimination / inlining,
+-- though currently CSE.hs doesn't use this
+module NParse where
 
 import Control.Applicative
 import Control.Lens
@@ -74,6 +76,8 @@ setBindsm =
       mempty
 
 -- | preorder traversal the current scope available `Map _binds _j`
+--
+-- don't edit _ns from T0
 preorderScope :: (Applicative f) => (Map Text Int -> T -> f T) -> Map Text Int -> T -> f T
 preorderScope f e t0@NT {} = f e t0
 preorderScope f e t0@T0 {..} = do
@@ -154,11 +158,6 @@ rightChars z = do
   f <- z ^? focus
   guard (isAlphaNum f || f == '_')
   Just (f, z)
-
--- find ident based on line/col in the [T]
--- go up looking at _binds
--- search/replace lines below unless there's another _binds
--- Control.Zipper
 
 -- Data.List.break but the left list is reversed
 breakRev :: (a -> Bool) -> [a] -> ([a], [a])
