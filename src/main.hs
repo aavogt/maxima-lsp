@@ -4,6 +4,7 @@ import Control.Exception
 import Control.Lens
 import Control.Lens.Regex.Text
 import Control.Monad
+import DB (DB (completions, hover), openDB)
 import Data.Aeson
 import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.QQ
@@ -16,16 +17,14 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 import qualified Data.Text.IO as T
+import Ident (identifierUnderCursor, splitPos)
+import NParse (commentedVars, renameScoped)
+import Pun (json)
+import RPC (addContentLength, message)
+import Range (Range, rangeLine, toPrrFrom, wholeRange)
 import System.IO
 import System.Posix.Resource
 import Text.Regex.PCRE.Light (compile)
-
-import Ident ( identifierUnderCursor, splitPos )
-import DB ( openDB, DB(hover, completions) )
-import Pun (json)
-import RPC ( addContentLength, message )
-import Range ( toPrrFrom, wholeRange, rangeLine, Range )
-import NParse (commentedVars, renameScoped)
 
 limit :: Resource -> Integer -> IO ()
 limit resource amt = setResourceLimit resource (ResourceLimits (ResourceLimit amt) (ResourceLimit amt))
@@ -46,12 +45,11 @@ main = do
       hFlush stdout
     threadDelay (100 * 1000) -- 0.1s
 
-
 lsp :: DB -> MVar Documents -> Value -> IO (Maybe Value)
 lsp db documents [json| method params id |] = case method :: Text of
   "initialize" ->
-      resp
-          [aesonQQ|
+    resp
+      [aesonQQ|
             { capabilities :
               { renameProvider : { prepareProvider : true, workDoneProgress : false }
               , hoverProvider : true
@@ -121,32 +119,32 @@ toCompletionWithComment :: (Text, (String, Bool)) -> Maybe (Text, Bool, Maybe Te
 toCompletionWithComment (comment, (ident, isFunction)) =
   let identText = T.pack ident
       commentText = normalizeComment comment
-  in Just (identText, isFunction, commentText)
+   in Just (identText, isFunction, commentText)
 
 normalizeComment :: Text -> Maybe Text
 normalizeComment comment =
   let trimmed = T.strip comment
-  in if T.null trimmed
-       then Nothing
-       else Just trimmed
+   in if T.null trimmed
+        then Nothing
+        else Just trimmed
 
 completionItems :: Text -> Int -> Int -> [(Text, Bool, Maybe Text)] -> [Value]
 completionItems content line character =
   let replaceRange = maybe (rangeLine line character character) (toPrrFrom line character) (splitPos content line character)
-  in map \(ident, isFunction, mComment) ->
-    let insertText = if isFunction then ident <> "(" else ident
-        baseItem =
-          [aesonQQ|
+   in map \(ident, isFunction, mComment) ->
+        let insertText = if isFunction then ident <> "(" else ident
+            baseItem =
+              [aesonQQ|
             { label: #{ident}
             , textEdit: { range: #{replaceRange}, newText: #{insertText} }
             , data: { identifier: #{ident} }
             }
           |]
-    in case mComment of
-        Nothing -> baseItem
-        Just comment ->
-          baseItem `unsafeAppend`
-            [aesonQQ|
+         in case mComment of
+              Nothing -> baseItem
+              Just comment ->
+                baseItem
+                  `unsafeAppend` [aesonQQ|
               { documentation:
                   { kind: "markdown"
                   , value: #{comment}
@@ -187,21 +185,22 @@ codeActionRequest documents params = case params of
   _ -> pure [aesonQQ| [] |]
 
 unsafeAppend :: Value -> Value -> Value
-unsafeAppend (Object a) (Object b) = Object (a<>b)
+unsafeAppend (Object a) (Object b) = Object (a <> b)
+
 -- PatternMatchFail will be caught
 
 rename :: MVar Documents -> Value -> IO Value
 rename documents [json| _textDocument{uri} _position{line character} newName |] = do
   Just content <- getDocumentContent documents uri
   let Just ident = identifierUnderCursor content line character
-      regex = compile ("\\b"<>T.encodeUtf8 ident<>"\\b") []
+      regex = compile ("\\b" <> T.encodeUtf8 ident <> "\\b") []
       fallbackContent = content & regexing regex . match .~ newName
       editRange = wholeRange content
   newContent <- case renameScoped content line character newName of
-        Right scopedContent -> return scopedContent
-        Left renameScopeFailures -> do
-            sendShowMessage (T.pack (unlines renameScopeFailures))
-            return fallbackContent
+    Right scopedContent -> return scopedContent
+    Left renameScopeFailures -> do
+      sendShowMessage (T.pack (unlines renameScopeFailures))
+      return fallbackContent
   pure $! workspaceEditValue (uriToFilePath uri) editRange newContent
 
 prepareRename :: MVar Documents -> Value -> IO Value
