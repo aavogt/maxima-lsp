@@ -41,8 +41,10 @@ import Text.Regex.PCRE.Light (compile)
 -- it would be preferable to have T a = T0 { .. , _binds :: a},
 -- then T [Text] -> T (Map Text Int)
 -- but NT complicates it
-data T = T0 {_i, _j :: Int, _n :: Text, _ns :: [T], _binds :: [Text], _bindline :: Map Text Int}
-  | NT {_j :: Int, _n :: Text, _bindline :: Map Text Int} deriving (Show, Eq, Data)
+data T
+  = T0 {_i, _j :: Int, _n :: Text, _ns :: [T], _binds :: [Text], _bindline :: Map Text Int}
+  | NT {_j :: Int, _n :: Text, _bindline :: Map Text Int}
+  deriving (Show, Eq, Data)
 
 instance Plated T
 
@@ -89,7 +91,7 @@ preorderScope f e t0@T0 {..} = do
 -- | don't edit _ns from T0, don't change from T0 to NS
 preorder :: Traversal' T T
 preorder f t0@NT {} = f t0
-preorder f t0@T0{ _ns = []} = f t0
+preorder f t0@T0 {_ns = []} = f t0
 preorder f t0 = do
   t1 <- f t0
   ns1 <- (traversed . preorder) f (t0 ^. ns)
@@ -109,12 +111,12 @@ testSN = do
 
 -- HasCallStack?
 -- [msg| line col |] expands to line:{line} col:{col} {prettyCallStack callStack}
--- single qq 
+-- single qq
 -- [err| description |] f
 f ? msg = \x -> case f <$> x of
   Right Nothing -> Left [msg]
   Right (Just a) -> Right a
-  Left msg  -> Left msg
+  Left msg -> Left msg
 
 -- Ident.identifierUnderCursor redone
 renameScoped_ (t :: [T]) line col =
@@ -132,13 +134,14 @@ collectLRIdent t0 z =
   )
   where
     ident = dropWhile isDigit $ unfoldr leftChars z `revAppend` (maybeToList (midChar z) ++ unfoldr rightChars z)
-    identBindingLine = maybe (Left ["ident:" ++ ident ++ " not in bindline" ++ show (upward z ^? focus)]) Right 
-        $ upward z ^? focus . bindline . ix (T.pack ident)
+    identBindingLine =
+      maybe (Left ["ident:" ++ ident ++ " not in bindline" ++ show (upward z ^? focus)]) Right $
+        upward z ^? focus . bindline . ix (T.pack ident)
     applyRename renameLine = do
       identBindingLine <&> \jTarget ->
-        let sameBinding u = u^?bindline . ix (T.pack ident) == Just jTarget
-        -- linear search by lines...
-        in fromTrees $ transformOn (traversed . filtered sameBinding) (n %~ renameLine) t0
+        let sameBinding u = u ^? bindline . ix (T.pack ident) == Just jTarget
+         in -- linear search by lines...
+            fromTrees $ transformOn (traversed . filtered sameBinding) (n %~ renameLine) t0
 
 revAppend xs ys = foldl (flip (:)) ys xs
 
@@ -177,9 +180,11 @@ addBinds1 = \case
 boundVars :: Text -> [Text]
 boundVars x =
   x
-    ^.. adjoin 
-          [regex|\(([^)]*)\)\s*:+=|]                     -- f (x,y) :=
-          [regex|(?:(?:block|lambda)\s*\(\[([^]]*))*\]|] -- lambda([x,y],
+    ^.. adjoin
+      [regex|\(([^)]*)\)\s*:+=|]
+      -- f (x,y) :=
+      [regex|(?:(?:block|lambda)\s*\(\[([^]]*))*\]|]
+      -- lambda([x,y],
       . groups
       . traversed
       . to (T.splitOn ",")
