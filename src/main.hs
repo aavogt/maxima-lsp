@@ -1,3 +1,4 @@
+import CSE (cse, uncse)
 import Control.Concurrent
 import Control.Exception
 import Control.Lens
@@ -55,6 +56,10 @@ lsp db documents [json| method params id |] = case method :: Text of
               { renameProvider : { prepareProvider : true, workDoneProgress : false }
               , hoverProvider : true
               , completionProvider : { resolveProvider : true }
+              , codeActionProvider:
+                  { codeActionKinds: ["refactor.cse", "refactor.uncse"]
+                  , resolveProvider: false
+                  }
               , textDocumentSync :
                   { openClose : true
                   , change : 1
@@ -68,6 +73,7 @@ lsp db documents [json| method params id |] = case method :: Text of
   "textDocument/hover" -> respIo (findHoverRequest db documents params)
   "textDocument/completion" -> respIo (completionRequest db documents params)
   "completionItem/resolve" -> respIo (completionItemResolve db params)
+  "textDocument/codeAction" -> respIo (codeActionRequest documents params)
   _ -> pure Nothing
   where
     resp (result :: Value) = pure $ Just [aesonQQ| { jsonrpc: "2.0", id : #{id :: Int}, result : #{result} } |]
@@ -157,6 +163,28 @@ completionItemResolve db item = case item of
       Just hoverText ->
         item `unsafeAppend` [aesonQQ| { documentation : { kind : "markdown", value : #{hoverText} } } |]
   _ -> pure item
+
+codeActionRequest :: MVar Documents -> Value -> IO Value
+codeActionRequest documents params = case params of
+  [json| _textDocument{uri}
+          _range{ start{ line = l1, character = c1 }
+                end{ line = l2, character = c2 } } |] -> do
+      Just content <- getDocumentContent documents uri
+      let editRange = wholeRange content
+          cseText = cse l1 c1 l2 c2 content
+          uncseText = uncse l1 c1 content
+          mkAction (title :: Text) (kind :: Text) newText =
+            [aesonQQ|
+            { title: #{title}
+            , kind: #{kind}
+            , edit: #{workspaceEditValue (uriToFilePath uri) editRange newText}
+            }
+          |]
+      pure
+        [aesonQQ| [ #{mkAction "CSE" "refactor.cse" cseText}
+                   , #{mkAction "Un-CSE" "refactor.uncse" uncseText}
+                   ] |]
+  _ -> pure [aesonQQ| [] |]
 
 unsafeAppend :: Value -> Value -> Value
 unsafeAppend (Object a) (Object b) = Object (a<>b)
