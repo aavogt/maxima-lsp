@@ -199,8 +199,8 @@ jsonMerge a _ = a
 data Tree
   -- | branch tagged with the parenthesis type
   = B Tag [Tree]
-  | -- | variable / label
-    V String
+  | -- | variable / label with optional binding name
+    V String (Maybe String)
   deriving (Show)
 
 ppTree :: Tree -> String
@@ -210,7 +210,8 @@ ppTree (B tag ts) = wrap tag $ unwords (map ppTree ts)
       C -> \inside -> "{" ++ inside ++ "}"
       A -> \inside -> "[" ++ inside ++ "]"
       D -> \inside -> "[" ++ inside ++ "]"
-ppTree (V x) = x
+ppTree (V x Nothing) = x
+ppTree (V x (Just y)) = x ++ " = " ++ y
 
 parseRec :: String -> Tree
 parseRec str = case parseRec' 0 0 0 [[]] (lexing str) of
@@ -224,8 +225,14 @@ parseRec' n m o acc         ("[" : rest) = parseRec' n m (o + 1) ([] : acc) rest
 parseRec' n m o (a : b : c) ("}" : rest) = parseRec' (n - 1) m o ((B C (reverse a) : b) : c) rest
 parseRec' n m o (a : b : c) (")" : rest) = parseRec' n (m - 1) o ((B D (reverse a) : b) : c) rest
 parseRec' n m o (a : b : c) ("]" : rest) = parseRec' n m (o - 1) ((B A (reverse a) : b) : c) rest
+parseRec' n m o (b : c) ("," : rest) = parseRec' n m o (b : c) rest
+parseRec' n m o (b : c) (a : "=" : name : rest)
+  | a `notElem` ["{", "}", "(", ")", "[", "]", ",", "="]
+    , name `notElem` ["{", "}", "(", ")", "[", "]", ",", "="] =
+      parseRec' n m o ((V a (Just name) : b) : c) rest
 parseRec' n m o (b : c) (a : rest)
-  | a `notElem` ["{", "}", "(", ")"] = parseRec' n m o ((V a : b) : c) rest
+  | a `notElem` ["{", "}", "(", ")", "[", "]", ",", "="] =
+      parseRec' n m o ((V a Nothing : b) : c) rest
 parseRec' 0 0 0 (a : _) [] = a
 parseRec' _ _ o acc e =
   error $
@@ -259,7 +266,7 @@ json =
 
 -- | Wrap a bare @V x@ in @C [V x]@ (implicit braces at top level).
 addRoot :: Tree -> Tree
-addRoot (V a) = B C [V a]
+addRoot (V a b) = B C [V a b]
 addRoot t = t
 
 -- ── Expression ────────────────────────────────────────────────────────────────
@@ -269,14 +276,16 @@ jExp (B C as) = [|object $(listE (map mkPair (jMes as)))|]
     mkPair (l, e) = [|Key.fromString $(litE (stringL l)) .= $e|]
 jExp (B D as) = [|toJSON $(listE (map jExpElem as))|]
   where
-    jExpElem (V a) = varE (mkName a)
+    jExpElem (V a Nothing) = varE (mkName a)
+    jExpElem (V _ (Just b)) = varE (mkName b)
     jExpElem t = jExp t
-jExp (V a) = varE (mkName a) -- should only appear inside mes
+jExp (V a b) = varE (mkName (fromMaybe a b)) -- should only appear inside mes
 
 jMes :: [Tree] -> [(String, ExpQ)]
-jMes (V a : V "@" : b : rest) = (a, [|jsonMerge $(jExp b) $(varE (mkName a))|]) : jMes rest
-jMes (V a : B t b : rest) = (a, jExp (B t b)) : jMes rest
-jMes (V a : rest) = (a, varE (mkName a)) : jMes rest
+jMes (V a _ : V "@" _ : b : rest) = (a, [|jsonMerge $(jExp b) $(varE (mkName a))|]) : jMes rest
+jMes (V a _ : B t b : rest) = (a, jExp (B t b)) : jMes rest
+jMes (V a (Just b) : rest) = (a, varE (mkName b)) : jMes rest
+jMes (V a Nothing : rest) = (a, varE (mkName a)) : jMes rest
 jMes [] = []
 jMes inp = error $ "Data.Aeson.QQ.Pun.jMes: unexpected: " ++ show (map ppTree inp)
 
@@ -287,17 +296,20 @@ jPat tree = case jPat1 tree `runReader` C of
   _ -> wildP
 
 jPat1 :: Tree -> EPM
-jPat1 (V (unesc -> EV wasOdd a))
-  | wasOdd = epm0 [|jsonGet @Value a|] -- wildP
-  | otherwise = do
-    tag <- ask
-    let e = if tag == A then [|Just|] else [|jsonGet a|]
-        addJust
-            | tag /= D = \r -> [p| Just $r |]
-            | otherwise = id
-    epm e (addJust (varP (mkName a)))
-jPat1 (B C (V a : B cd xs : rest)) =
-  let ma    = jPat1 (V a)
+jPat1 (V a mb) =
+  let EV wasOdd key = unesc a
+      binding = fromMaybe key mb
+   in if wasOdd
+        then epm0 [|jsonGet @Value key|] -- wildP
+        else do
+          tag <- ask
+          let e = if tag == A then [|Just|] else [|jsonGet key|]
+              addJust
+                  | tag /= D = \r -> [p| Just $r |]
+                  | otherwise = id
+          epm e (addJust (varP (mkName binding)))
+jPat1 (B C (V a b : B cd xs : rest)) =
+  let ma    = jPat1 (V a b)
       mxs   = jPat1 (B cd xs)
       mrest = jPat1 (B C rest)
    in enter cd $ (ma `contains` mxs) <> mrest
