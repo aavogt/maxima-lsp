@@ -14,6 +14,7 @@ data-files:
 executable maxima-lsp
   main-is: main.hs
   other-modules:
+      CSE
       DB
       Ident
       NLex
